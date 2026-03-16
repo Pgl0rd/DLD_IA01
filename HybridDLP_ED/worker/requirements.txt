@@ -1,0 +1,35 @@
+# Detection Engine (L3) Requirements
+
+# Database
+# sqlite3 is built-in
+
+# File Processing
+yara-python>=4.3.0
+python-magic>=0.4.27  # File type detection
+
+# OCR
+pytesseract>=0.3.10
+Pillow>=10.0.0
+opencv-python>=4.8.0
+
+# Machine Learning
+scikit-learn>=1.3.0
+numpy>=1.24.0
+pandas>=2.0.0
+joblib>=1.3.0  # Model serialization
+
+# System Monitoring
+psutil>=5.9.0  # CPU/Memory monitoring
+
+# HTTP Client (gửi về server)
+requests>=2.31.0
+
+# Logging
+loguru>=0.7.0  # Better logging
+
+# Configuration
+python-dotenv>=1.0.0  # Environment variables
+
+# Note: Windows notification packages (win10toast, plyer, pywin32) are NOT included here
+# because worker runs in Docker (Linux). Notifications are handled by agent (Windows).
+# windows_notification.py has fallback to console logging if packages are not available.

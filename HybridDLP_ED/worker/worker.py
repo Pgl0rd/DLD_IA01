@@ -1,0 +1,951 @@
+"""
+Detection Engine - Main Entry Point (L3)
+Worker Process xử lý events từ Agent (L1)
+"""
+import sys
+import signal
+import time
+import os
+from pathlib import Path
+from loguru import logger
+import sys
+from pathlib import Path
+
+# Add current directory to path
+BASE_DIR = Path(__file__).parent
+sys.path.insert(0, str(BASE_DIR))
+
+from config import WorkerConfig
+
+# Import các modules
+# Use JSONL consumer instead of SQLite to avoid database locking issues
+from core.jsonl_queue_consumer import JSONLQueueConsumer as QueueConsumer
+from core.hash_cache import HashCacheManager
+from core.fast_scan import FastScanEngine
+from core.deep_analysis import DeepAnalysisEngine
+from core.risk_scoring import RiskScoringEngine
+from core.action_executor import ActionExecutor
+from core.report_generator import ReportGenerator
+from core.behavioral_rules import BehavioralRulesEngine
+# Import ML module from ML folder
+ML_DIR = Path(__file__).parent.parent / "ML"
+if ML_DIR.exists():
+    sys.path.insert(0, str(ML_DIR.parent))
+    from ML.behavioral_ml_analyzer import BehavioralMLAnalyzer
+else:
+    # Fallback to old location
+    from ml_pipeline.behavioral_ml_analyzer import BehavioralMLAnalyzer
+
+
+class DetectionEngine:
+    """Detection Engine Main Class"""
+    
+    def __init__(self):
+        logger.info("Initializing Detection Engine components...")
+
+        self.queue_consumer = QueueConsumer()
+        self.hash_cache = HashCacheManager()
+        self.fast_scan = FastScanEngine()
+        self.deep_analysis = DeepAnalysisEngine()
+        self.risk_scoring = RiskScoringEngine()
+        self.action_executor = ActionExecutor()
+        self.report_generator = ReportGenerator()
+        self.behavioral_rules = BehavioralRulesEngine()  # Behavioral rules engine
+        self.ml_analyzer = BehavioralMLAnalyzer()  # UEBA ML analyzer
+        
+        # Event history buffer for ML frequency features (last 1000 events)
+        self.event_history = []
+        self.max_history_size = 1000
+        
+        self.running = False
+        self.processed_count = 0
+        self.error_count = 0
+        
+        logger.info("Detection Engine initialized successfully")
+    
+    def process_event(self, event: dict) -> bool:
+        """
+        Xử lý 1 event từ Agent.
+        
+        Event schema từ Agent:
+        - File events: có path
+        - Clipboard events: có content.sample hoặc clipboard.text_file
+        - Other events: heartbeat, usb_mounted, etc.
+        """
+        event_id = event.get('event_id', 'unknown')
+        event_type = event.get('type') or event.get('event_type', 'unknown')
+        pid = os.getpid()
+        
+        # Skip heartbeat events - không cần quét
+        if event_type and event_type.lower() == 'heartbeat':
+            logger.debug(f"[PID={pid}] Skipping heartbeat event: event_id={event_id}")
+            return True
+        
+        logger.info(
+            f"[PID={pid}] Processing event: "
+            f"event_id={event_id}, type={event_type}"
+        )
+        
+        try:
+            # ==== 0. Chuẩn hoá schema sự kiện ====
+            # Map event từ agent schema sang detection engine schema
+            # Check both 'type' and 'event_type' for compatibility
+            event_type = event.get('type') or event.get('event_type', '')
+            source = event.get('source', '')
+            operation = event.get('operation', {}) or {}
+            op_type = operation.get('op_type', '').lower()
+            
+            # Double check heartbeat after normalization
+            if event_type and event_type.lower() == 'heartbeat':
+                logger.debug(f"[PID={pid}] Skipping heartbeat event after normalization: event_id={event_id}")
+                return True
+            
+            # ==== Xử lý Clipboard Events ====
+            # Check nếu là clipboard event (clipboard_paste, clipboard_text, etc.)
+            # Also check clipboard field exists
+            has_clipboard_field = 'clipboard' in event and event.get('clipboard')
+            is_clipboard_event = (
+                'clipboard' in event_type.lower() or
+                'clipboard' in source.lower() or
+                'clipboard' in op_type or
+                has_clipboard_field
+            )
+            
+            # Log for debugging
+            if is_clipboard_event:
+                logger.debug(f"Detected clipboard event: type={event_type}, source={source}, op_type={op_type}, has_clipboard_field={has_clipboard_field}")
+            
+            if is_clipboard_event:
+                return self._process_clipboard_event(event)
+            
+            # ==== Xử lý File Events ====
+            # Lấy file path từ nhiều nguồn có thể
+            file_path_str = (
+                event.get('path') or 
+                event.get('file_path') or 
+                event.get('object', {}).get('path') or
+                ''
+            )
+            
+            # Special events that don't have file path but need behavioral rules analysis
+            is_special_event = (
+                event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
+                or event_type.startswith('corr_')
+                or 'tags' in event and any(str(t).startswith('corr_') for t in event.get('tags', []))
+            )
+
+            if not file_path_str:
+                if is_special_event:
+                    return self._process_special_event(event)
+                
+                # Những event còn lại thực sự không có file (heartbeat, etc.)
+                logger.debug(f"Skipping non-file event: {event_type}")
+                return True
+            
+            file_path = Path(file_path_str)
+            
+            if not file_path.exists():
+                logger.debug(f"File not found (may be deleted): {file_path}")
+                return False
+            
+            # Check file size limit
+            try:
+                size_bytes = event.get('size') or event.get('object', {}).get('size_bytes')
+                if size_bytes is None:
+                    size_bytes = file_path.stat().st_size
+                file_size_mb = size_bytes / (1024 * 1024)
+                if file_size_mb > WorkerConfig.MAX_FILE_SIZE_MB:
+                    logger.debug(f"Skipping large file: {file_path.name} ({file_size_mb:.2f}MB)")
+                    return False
+            except Exception as e:
+                logger.warning(f"Error checking file size: {e}")
+                return False
+            
+            # 1. Check Panic Mode
+            panic_mode = self.queue_consumer.check_panic_mode()
+            # Nếu hệ thống upstream báo panic_mode thì OR thêm
+            if event.get('system', {}).get('panic_mode', False):
+                panic_mode = True
+            
+            # 2. Hash Cache Check
+            file_hash = self.hash_cache.calculate_hash(file_path)
+            if not file_hash:
+                logger.warning(f"Failed to calculate hash for {file_path}")
+                return False
+            
+            cached_result = self.hash_cache.get_cached_result(file_hash)
+            if cached_result:
+                scan_result = cached_result.get('scan_result', '')
+                if scan_result == 'safe':
+                    logger.debug(f"File cached as safe: {file_path.name}")
+                    self.processed_count += 1
+                    return True
+                # Nếu cached là malicious, vẫn cần check lại (có thể policy thay đổi)
+            
+            # 3. Fast Scan
+            fast_scan_result = self.fast_scan.scan_file(file_path, panic_mode)
+            
+            # 4. Decision Point
+            if fast_scan_result.get('is_suspicious', False):
+                # Nếu YARA phát hiện ngay với high confidence → có thể skip deep analysis
+                yara_matches = fast_scan_result.get('yara_matches', [])
+                if yara_matches and not panic_mode:
+                    # Check nếu là high-risk rule (ID, credit card)
+                    high_risk_rules = ['id', 'cmnd', 'cccd', 'credit', 'card']
+                    is_high_risk = any(
+                        any(keyword in match.get('rule', '').lower() for keyword in high_risk_rules)
+                        for match in yara_matches
+                    )
+                    
+                    if is_high_risk:
+                        # High risk từ YARA → skip deep analysis để nhanh
+                        deep_analysis_result = {'is_sensitive': True}
+                    else:
+                        # 5. Deep Analysis (nếu không panic mode)
+                        deep_analysis_result = self.deep_analysis.analyze(
+                            file_path,
+                            fast_scan_result.get('file_type'),
+                            panic_mode
+                        )
+                else:
+                    # Panic mode hoặc không có YARA match → skip deep analysis
+                    deep_analysis_result = {'is_sensitive': False}
+            else:
+                # Safe từ fast scan → skip deep analysis
+                deep_analysis_result = {'is_sensitive': False}
+            
+            # 5.5. Behavioral Rules Check (theo Noteupdate.txt)
+            # Check các behavioral rules dựa trên điều kiện từ event fields
+            behavioral_matches = self.behavioral_rules.check_all(event, fast_scan_result)
+            
+            # Nếu có behavioral rule match, tăng risk score
+            behavioral_risk_boost = 0
+            behavioral_details = {}
+            if behavioral_matches:
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match:
+                    # Tăng risk score dựa trên severity
+                    severity_boost = WorkerConfig.BEHAVIORAL_RISK_BOOST
+                    behavioral_risk_boost = severity_boost.get(highest_match.get('severity', 'low'), 0)
+                    behavioral_details = {
+                        'behavioral_rule_matched': highest_match.get('rule'),
+                        'behavioral_reason': highest_match.get('reason', ''),
+                        'behavioral_severity': highest_match.get('severity'),
+                        'all_behavioral_matches': behavioral_matches
+                    }
+                    logger.warning(
+                        f"Behavioral Rule Matched: {highest_match.get('rule')} - "
+                        f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
+                    )
+            
+            # 5.6. UEBA ML Anomaly Detection
+            ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
+            if self.ml_analyzer.is_available():
+                try:
+                    # Use recent event history for frequency features
+                    recent_history = self.event_history[-100:] if len(self.event_history) > 100 else self.event_history
+                    ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
+                    
+                    if ml_anomaly_result.get('is_anomaly', False):
+                        anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
+                        logger.warning(
+                            f"UEBA Anomaly Detected: score={anomaly_score:.2f} "
+                            f"(raw={ml_anomaly_result.get('raw_score', 0):.3f})"
+                        )
+                except Exception as e:
+                    logger.error(f"Error in ML anomaly detection: {e}")
+            
+            # 6. Risk Scoring
+            # Chuẩn hoá context cho RiskScoringEngine
+            # Lấy context từ event
+            ctx = event.get('context', {}) or {}
+            
+            # action_type: ưu tiên event_type từ agent, fallback type
+            action_type = event.get('event_type') or event.get('type', 'file_copy')
+            
+            # destination: từ correlation events hoặc context
+            destination = event.get('destination', '')
+            if not destination and ctx:
+                # Có thể có thông tin destination trong context
+                destination = ctx.get('destination', '')
+            
+            # user: từ context
+            user = ctx.get('user') or event.get('user', 'unknown')
+            
+            # Detect exfiltration from sensitive folders (config-based)
+            obj = event.get('object', {}) or {}
+            src_path = str(obj.get('path') or file_path_str or '').lower()
+            dst_path = str(
+                obj.get('dst_path') or
+                event.get('dst_path') or
+                event.get('Dest_Path') or
+                ''
+            ).lower()
+            sensitive_folders = WorkerConfig.SENSITIVE_EXFIL_FOLDERS
+            is_sensitive_folder_src = any(
+                src_path.startswith(folder) for folder in sensitive_folders
+            ) if src_path else False
+            is_same_folder = bool(dst_path) and any(
+                dst_path.startswith(folder) for folder in sensitive_folders
+            )
+            is_sensitive_folder_exfil = is_sensitive_folder_src and (not is_same_folder)
+            
+            event_context = {
+                'action_type': action_type,
+                'destination': destination,
+                'user': user,
+                'time': event.get('ts') or event.get('timestamp', ''),
+                'location': str(file_path.parent),
+                'file_size_mb': file_size_mb,
+                # Bổ sung context nâng cao
+                'process_name': ctx.get('process_name'),
+                'active_window': ctx.get('active_window'),
+                'event_id': event.get('event_id'),
+                'source': event.get('source', 'unknown'),
+                'severity': event.get('severity'),
+                'extension': event.get('ext') or file_path.suffix,
+                # Behavioral rules context
+                'behavioral_risk_boost': behavioral_risk_boost,
+                'behavioral_details': behavioral_details,
+                # UEBA ML anomaly detection
+                'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
+                'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
+                # Hard policy: any exfil from sensitive folders must be max score + alert
+                'force_max_risk': is_sensitive_folder_exfil,
+                'force_max_risk_reason': (
+                    f"Sensitive folder exfiltration from {src_path} to {dst_path}"
+                    if is_sensitive_folder_exfil else ''
+                ),
+                '_event_data': event
+            }
+            
+            risk_result = self.risk_scoring.calculate_score(
+                fast_scan_result,
+                deep_analysis_result,
+                event_context
+            )
+            
+            # Apply behavioral risk boost
+            if behavioral_risk_boost > 0:
+                risk_result['total_score'] = min(100, risk_result['total_score'] + behavioral_risk_boost)
+                risk_result['details']['behavioral'] = behavioral_details
+                # Nếu behavioral rule match + high severity → force alert/block
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match and highest_match.get('severity') == 'high':
+                    # Alert-only system: never force block
+                    if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
+                        risk_result['action'] = 'alert'
+            
+            # 7. Generate Report Fields
+            report = self.report_generator.generate_report(
+                event,
+                fast_scan_result,
+                deep_analysis_result,
+                risk_result,
+                file_path
+            )
+            
+            # 8. Action Executor (với report fields)
+            action = risk_result['action']
+            self.action_executor.execute(
+                action,
+                file_path,
+                risk_result['total_score'],
+                risk_result['details'],
+                event_context,
+                report  # Pass report fields
+            )
+            
+            # 9. Update Cache
+            scan_result = 'malicious' if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert'] else 'safe'
+            self.hash_cache.save_result(
+                file_hash,
+                str(file_path),
+                file_path.stat().st_size,
+                scan_result,
+                risk_result['total_score'],
+                action
+            )
+            
+            # Update Event History for ML
+            self.event_history.append(event.copy())
+            if len(self.event_history) > self.max_history_size:
+                self.event_history.pop(0)  # Remove oldest event
+            
+            self.processed_count += 1
+            
+            logger.info(
+                f"Processed: {file_path.name} | "
+                f"Score: {risk_result['total_score']:.1f} | "
+                f"Action: {action.upper()} | "
+                f"Sensitivity: {report.get('File_Sensitivity', 'Unknown')}"
+            )
+            
+            return True
+            
+        except KeyboardInterrupt:
+            raise
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Error processing event: {e}", exc_info=True)
+            return False
+    
+    def _process_clipboard_event(self, event: dict) -> bool:
+        """
+        Xử lý clipboard event (paste, copy)
+        
+        Logic:
+        1. Lấy text content từ content.sample hoặc clipboard.text_file
+        2. Scan text với YARA rules
+        3. Nếu hit YARA + window_title (gpt, discord, zalo) + clipboard_paste → alert/block
+        """
+        try:
+            # Log event structure for debugging
+            logger.debug(f"Clipboard event structure: type={event.get('type')}, source={event.get('source')}, has_clipboard={bool(event.get('clipboard'))}, has_content={bool(event.get('content'))}")
+            
+            content = event.get('content', {}) or {}
+            clipboard = event.get('clipboard', {}) or {}
+            raw_original = event.get('raw_original', {}) or {}
+            
+            raw_clipboard = raw_original.get('clipboard', {}) or {}
+            raw_content = raw_original.get('content', {}) or {}
+            
+            # Try multiple sources for text content
+            text_content = (
+                clipboard.get('text_file') or      # Primary: clipboard.text_file
+                raw_clipboard.get('text_file') or  # From raw_original
+                content.get('sample') or            # content.sample
+                raw_content.get('sample') or        # raw_original.content.sample
+                clipboard.get('content') or         # clipboard.content (if string)
+                ''
+            )
+            
+            # If text_content is still empty, check if it's an image that needs OCR
+            if not text_content or not text_content.strip():
+                # Check if clipboard contains image (content_type = Image, FileList, or similar)
+                content_type = (
+                    clipboard.get('content_type') or
+                    raw_clipboard.get('content_type') or
+                    ''
+                ).lower()
+                
+                # Check for FileList with image files (per event sample: content_type="FileList", file_list=["path/to/image.png"])
+                file_list = (
+                    clipboard.get('file_list') or
+                    raw_clipboard.get('file_list') or
+                    []
+                )
+                
+                image_file_path = None
+                
+                # Case 1: content_type = "FileList" with image files
+                if content_type == 'filelist' and file_list:
+                    # Find first image file in file_list
+                    image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']
+                    for file_path_str in file_list:
+                        if file_path_str:
+                            file_path_obj = Path(str(file_path_str))
+                            if file_path_obj.suffix.lower() in image_extensions:
+                                image_file_path = file_path_obj
+                                logger.info(f"Found image file in FileList: {image_file_path}")
+                                break
+                
+                # Case 2: content_type = "Image" or similar with direct image_file path
+                if not image_file_path and ('image' in content_type or not content_type):
+                    image_file_path = (
+                        clipboard.get('image_file') or
+                        raw_clipboard.get('image_file') or
+                        clipboard.get('file_path') or
+                        raw_clipboard.get('file_path') or
+                        None
+                    )
+                    if image_file_path:
+                        image_file_path = Path(image_file_path)
+                
+                # If we found an image file, perform OCR
+                if image_file_path:
+                    if image_file_path.exists():
+                        logger.info(f"Processing image file for OCR: {image_file_path}")
+                        # Extract OCR text from image
+                        ocr_text = self.deep_analysis.ocr_processor.extract_text(image_file_path)
+                        if ocr_text and ocr_text.strip():
+                            logger.info(f"OCR extracted {len(ocr_text)} characters from image: {ocr_text[:100]}...")
+                            # Use OCR text as text_content for scanning
+                            text_content = ocr_text
+                        else:
+                            logger.debug(f"No text extracted from image via OCR: {image_file_path}")
+                            # No text in image - but still process for behavioral rules (paste to Zalo is risky)
+                            # Don't return True here - let it continue to check behavioral rules
+                            text_content = ""  # Empty but continue processing
+                    else:
+                        logger.warning(f"Image file path does not exist: {image_file_path}")
+                        # File doesn't exist - skip OCR but continue for behavioral rules
+                        text_content = ""
+                
+                # If still no text content and not FileList/Image, skip
+                if not text_content and content_type not in ['filelist', 'image', 'bitmap', '']:
+                    logger.warning(
+                        f"Clipboard event has no text content and is not FileList/Image. "
+                        f"content_type={content_type}, "
+                        f"Available fields: clipboard.keys()={list(clipboard.keys()) if clipboard else []}"
+                    )
+                    # Still continue for behavioral rules check (FileList paste to Zalo is risky even without OCR)
+                    if content_type != 'filelist':
+                        return True
+            
+            # Log processing info
+            if text_content:
+                logger.info(f"Processing clipboard event: {len(text_content)} characters")
+                logger.debug(f"Clipboard text sample: {text_content[:200]}")
+            else:
+                # Check if this is FileList with images (OCR may have failed or no text in image)
+                content_type_check = (
+                    clipboard.get('content_type') or
+                    raw_clipboard.get('content_type') or
+                    ''
+                ).lower()
+                file_list_check = clipboard.get('file_list') or raw_clipboard.get('file_list') or []
+                if content_type_check == 'filelist' and file_list_check:
+                    logger.info(f"Processing clipboard FileList event (may contain images): {len(file_list_check)} file(s)")
+                else:
+                    logger.info(f"Processing clipboard event with no text content (content_type={content_type_check})")
+            
+            # 1. Check Panic Mode
+            panic_mode = self.queue_consumer.check_panic_mode()
+            if event.get('system', {}).get('panic_mode', False):
+                panic_mode = True
+            
+            # 2. Fast Scan text content with YARA (even if empty, for FileList we still check behavioral rules)
+            logger.debug("Starting YARA scan on clipboard content...")
+            if text_content:
+                fast_scan_result = self.fast_scan.scan_text_content(text_content, panic_mode)
+            else:
+                # No text content yet (FileList with images - OCR may extract text later, or no text in image)
+                # Still create empty scan result for behavioral rules check
+                fast_scan_result = {'yara_matches': [], 'is_suspicious': False}
+            
+            # Log YARA scan results
+            yara_matches = fast_scan_result.get('yara_matches', [])
+            if yara_matches:
+                logger.info(f"YARA matches found: {len(yara_matches)} rules matched")
+                for match in yara_matches:
+                    logger.info(f"  - Rule: {match.get('rule')}, Tags: {match.get('tags')}")
+            else:
+                logger.debug("No YARA matches in clipboard content")
+            
+            # 3. Deep Analysis (nếu có YARA match và không panic mode)
+            deep_analysis_result = {'is_sensitive': False}
+            if fast_scan_result.get('is_suspicious', False) and not panic_mode:
+                # Có thể thêm ML classification cho text nếu cần
+                deep_analysis_result = {'is_sensitive': True}
+            
+            # 3.5. Behavioral Rules Check (theo Noteupdate.txt)
+            # Check behavioral rules cho clipboard events
+            behavioral_matches = self.behavioral_rules.check_all(event, fast_scan_result)
+            
+            # Nếu có behavioral rule match, tăng risk score
+            behavioral_risk_boost = 0
+            behavioral_details = {}
+            if behavioral_matches:
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match:
+                    # Tăng risk score dựa trên severity
+                    severity_boost = WorkerConfig.BEHAVIORAL_RISK_BOOST
+                    behavioral_risk_boost = severity_boost.get(highest_match.get('severity', 'low'), 0)
+                    behavioral_details = {
+                        'behavioral_rule_matched': highest_match.get('rule'),
+                        'behavioral_reason': highest_match.get('reason', ''),
+                        'behavioral_severity': highest_match.get('severity'),
+                        'all_behavioral_matches': behavioral_matches
+                    }
+                    logger.warning(
+                        f"Behavioral Rule Matched (Clipboard): {highest_match.get('rule')} - "
+                        f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
+                    )
+            
+            # 4. Risk Scoring với context đặc biệt cho clipboard
+            ctx = event.get('context', {}) or {}
+            raw_ctx = raw_original.get('context', {}) or {}
+            operation = event.get('operation', {}) or {}
+            raw_clipboard = raw_original.get('clipboard', {}) or {}
+            
+            window_title = (
+                ctx.get('window_title') or                    
+                raw_ctx.get('window_title') or                
+                clipboard.get('active_window_title') or
+                raw_clipboard.get('active_window_title') or    
+                raw_clipboard.get('active_window_context') or 
+                ''
+            ).lower()
+            
+            # Check sensitive apps
+            sensitive_apps = ['gpt', 'chatgpt', 'discord', 'zalo', 'telegram', 'whatsapp', 'messenger']
+            is_sensitive_app = any(app in window_title for app in sensitive_apps)
+            
+            # Check clipboard_paste
+            op_type = operation.get('op_type', '').lower()
+            is_clipboard_paste = 'paste' in op_type or 'clipboard_paste' in event.get('type', '').lower()
+            
+            # Get domain from clipboard data
+            domain = (
+                clipboard.get('dest_domain') or
+                raw_clipboard.get('dest_domain') or
+                ''
+            ).lower()
+            
+            event_context = {
+                'action_type': operation.get('op_type') or event.get('type', 'clipboard'),
+                'destination': '',  # Clipboard không có destination
+                'user': ctx.get('user') or event.get('actor', {}).get('user', 'unknown'),
+                'time': event.get('ts') or event.get('timestamp', ''),
+                'location': 'clipboard',  # Clipboard location
+                'file_size_mb': 0,
+                'process_name': ctx.get('fg_app') or operation.get('tool'),
+                'active_window': window_title,
+                'window_title': window_title,
+                'domain': domain,  # Domain for context scoring
+                'event_id': event.get('event_id'),
+                'source': event.get('source', 'clipboard'),
+                'severity': event.get('severity'),
+                'extension': '',
+                'is_clipboard_paste': is_clipboard_paste,
+                'is_sensitive_app': is_sensitive_app,
+                'text_content': text_content[:100],  # Sample for logging
+                # Behavioral rules context
+                'behavioral_risk_boost': behavioral_risk_boost,
+                'behavioral_details': behavioral_details,
+                # Event data for risk scoring (IOC hits, etc.)
+                '_event_data': event
+            }
+            
+            risk_result = self.risk_scoring.calculate_score(
+                fast_scan_result,
+                deep_analysis_result,
+                event_context
+            )
+            
+            # Apply behavioral risk boost
+            if behavioral_risk_boost > 0:
+                risk_result['total_score'] = min(100, risk_result['total_score'] + behavioral_risk_boost)
+                risk_result['details']['behavioral'] = behavioral_details
+                # Nếu behavioral rule match + high severity → force alert/block
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match and highest_match.get('severity') == 'high':
+                    # Alert-only system: never force block
+                    if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
+                        risk_result['action'] = 'alert'
+            
+            # 5. Generate Report Fields
+            # Tạo dummy file_path cho report (vì clipboard không có file)
+            dummy_path = Path("clipboard://clipboard_content")
+            report = self.report_generator.generate_report(
+                event,
+                fast_scan_result,
+                deep_analysis_result,
+                risk_result,
+                dummy_path
+            )
+            
+            # 6. Action Executor
+            action = risk_result['action']
+            event_id = event.get('event_id', 'unknown')
+            pid = os.getpid()
+            
+            logger.info(
+                f"[PID={pid}] Clipboard processing complete: "
+                f"event_id={event_id}, action={action.upper()}, "
+                f"score={risk_result['total_score']:.1f}, "
+                f"yara_matches={len(yara_matches)}, "
+                f"behavioral_matches={len(behavioral_matches)}, "
+                f"window_title={window_title[:50]}"
+            )
+            
+            self.action_executor.execute(
+                action,
+                dummy_path,
+                risk_result['total_score'],
+                risk_result['details'],
+                event_context,
+                report
+            )
+            
+            self.processed_count += 1
+            
+            logger.info(
+                f"[PID={pid}] Processed Clipboard: "
+                f"event_id={event_id}, {len(text_content)} chars | "
+                f"Score: {risk_result['total_score']:.1f} | "
+                f"Action: {action.upper()} | "
+                f"App: {window_title[:30]} | "
+                f"YARA: {len(fast_scan_result.get('yara_matches', []))}"
+            )
+            
+            return True
+            
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Error processing clipboard event: {e}", exc_info=True)
+            return False
+    
+    def _process_special_event(self, event: dict) -> bool:
+        """
+        Xử lý các event đặc biệt không có file (proc_start, usb_connected, print_job, corr_*)
+        """
+        try:
+            event_id = event.get('event_id', 'unknown')
+            event_type = event.get('type') or event.get('event_type', 'unknown')
+            pid = os.getpid()
+            
+            logger.info(f"[PID={pid}] Processing special event: event_id={event_id}, type={event_type}")
+            
+            # Dummy scan results (no file)
+            fast_scan_result = {'yara_matches': [], 'is_suspicious': False}
+            deep_analysis_result = {'is_sensitive': False}
+            
+            # 1. Behavioral Rules Check
+            behavioral_matches = self.behavioral_rules.check_all(event, fast_scan_result)
+            
+            behavioral_risk_boost = 0
+            behavioral_details = {}
+            if behavioral_matches:
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match:
+                    severity_boost = WorkerConfig.BEHAVIORAL_RISK_BOOST
+                    behavioral_risk_boost = severity_boost.get(highest_match.get('severity', 'low'), 0)
+                    behavioral_details = {
+                        'behavioral_rule_matched': highest_match.get('rule'),
+                        'behavioral_reason': highest_match.get('reason', ''),
+                        'behavioral_severity': highest_match.get('severity'),
+                        'all_behavioral_matches': behavioral_matches
+                    }
+                    logger.warning(
+                        f"Behavioral Rule Matched (Special Event): {highest_match.get('rule')} - "
+                        f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
+                    )
+            
+            # 1.5. UEBA ML Anomaly Detection
+            ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
+            if self.ml_analyzer.is_available():
+                try:
+                    recent_history = self.event_history[-100:] if len(self.event_history) > 100 else self.event_history
+                    ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
+                    
+                    if ml_anomaly_result.get('is_anomaly', False):
+                        anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
+                        logger.warning(
+                            f"UEBA Anomaly Detected (Special Event): score={anomaly_score:.2f}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error in ML anomaly detection (special event): {e}")
+            
+            # 2. Risk Scoring
+            ctx = event.get('context', {}) or {}
+            operation = event.get('operation', {}) or {}
+            
+            event_context = {
+                'action_type': operation.get('op_type') or event_type,
+                'destination': event.get('object', {}).get('dst_path') or '',
+                'user': ctx.get('user') or event.get('actor', {}).get('user', 'unknown'),
+                'time': event.get('ts') or event.get('timestamp', ''),
+                'location': 'special_event',
+                'file_size_mb': 0,
+                'process_name': ctx.get('fg_app') or event.get('process', {}).get('name') or operation.get('tool') or '',
+                'active_window': ctx.get('window_title') or '',
+                'domain': '',
+                'event_id': event_id,
+                'source': event.get('source', 'unknown'),
+                'severity': event.get('severity'),
+                'behavioral_risk_boost': behavioral_risk_boost,
+                'behavioral_details': behavioral_details,
+                'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
+                'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
+                '_event_data': event
+            }
+            
+            risk_result = self.risk_scoring.calculate_score(
+                fast_scan_result,
+                deep_analysis_result,
+                event_context
+            )
+            
+            # Apply behavioral risk boost
+            if behavioral_risk_boost > 0:
+                risk_result['total_score'] = min(100, risk_result['total_score'] + behavioral_risk_boost)
+                risk_result['details']['behavioral'] = behavioral_details
+                
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match and highest_match.get('severity') == 'high':
+                    if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
+                        risk_result['action'] = 'alert'
+                        
+            # Cố định luôn đối với corr_* event
+            if event_type.startswith('corr_') and risk_result['total_score'] < 50:
+                risk_result['total_score'] = 75.0
+                risk_result['action'] = 'alert'
+            
+            # 3. Generate Report Fields
+            dummy_path = Path(f"special_event://{event_type}")
+            report = self.report_generator.generate_report(
+                event,
+                fast_scan_result,
+                deep_analysis_result,
+                risk_result,
+                dummy_path
+            )
+            
+            # 4. Action Executor
+            action = risk_result['action']
+            
+            self.action_executor.execute(
+                action,
+                dummy_path,
+                risk_result['total_score'],
+                risk_result['details'],
+                event_context,
+                report
+            )
+            
+            # Update Event History for ML
+            self.event_history.append(event.copy())
+            if len(self.event_history) > self.max_history_size:
+                self.event_history.pop(0)  # Remove oldest event
+            
+            self.processed_count += 1
+            
+            logger.info(
+                f"[PID={pid}] Processed Special Event: "
+                f"event_id={event_id}, type={event_type} | "
+                f"Score: {risk_result['total_score']:.1f} | "
+                f"Action: {action.upper()}"
+            )
+            
+            return True
+            
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Error processing special event: {e}", exc_info=True)
+            return False
+
+    def run(self):
+        """Main loop"""
+        self.running = True
+        logger.info("=" * 60)
+        logger.info("Detection Engine running...")
+        logger.info("=" * 60)
+        
+        # Cleanup cache on startup
+        try:
+            self.hash_cache.cleanup_old_entries()
+        except Exception as e:
+            logger.warning(f"Error cleaning cache: {e}")
+        
+        # Print stats
+        cache_stats = self.hash_cache.get_cache_stats()
+        logger.info(f"Cache stats: {cache_stats}")
+        
+        last_stats_time = time.time()
+        
+        while self.running:
+            try:
+                # Get event from queue
+                event = self.queue_consumer.get_event(timeout=1)
+                
+                if event:
+                    # Log event being processed
+                    event_id = event.get('event_id', 'unknown')
+                    event_type = event.get('type') or event.get('event_type', 'unknown')
+                    logger.info(
+                        f"[PID={os.getpid()}] Received event: "
+                        f"event_id={event_id}, type={event_type}, "
+                        f"source={event.get('source', 'unknown')}"
+                    )
+                    self.process_event(event)
+                else:
+                    # No event, sleep briefly
+                    time.sleep(0.1)
+                
+                # Print stats every 60 seconds
+                if time.time() - last_stats_time > 60:
+                    queue_stats = self.queue_consumer.get_stats()
+                    logger.info(
+                        f"Stats: Processed={self.processed_count}, "
+                        f"Errors={self.error_count}, "
+                        f"Queue={queue_stats['queue_size']}, "
+                        f"PanicMode={queue_stats['panic_mode']}"
+                    )
+                    last_stats_time = time.time()
+                    
+            except KeyboardInterrupt:
+                logger.info("Shutdown requested")
+                break
+            except Exception as e:
+                self.error_count += 1
+                logger.error(f"Error in main loop: {e}", exc_info=True)
+                time.sleep(1)  # Wait before retry
+        
+        logger.info("Detection Engine stopped")
+        logger.info(f"Final stats: Processed={self.processed_count}, Errors={self.error_count}")
+    
+    def stop(self):
+        """Stop detection engine"""
+        self.running = False
+
+
+def setup_logging():
+    """Setup logging"""
+    WorkerConfig.ensure_directories()
+    
+    # Remove default handler
+    logger.remove()
+    
+    # Add file handler
+    logger.add(
+        WorkerConfig.LOG_FILE,
+        rotation=WorkerConfig.LOG_ROTATION,
+        retention=WorkerConfig.LOG_RETENTION,
+        level=WorkerConfig.LOG_LEVEL,
+        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} | {message}"
+    )
+    
+    # Add console handler
+    logger.add(
+        sys.stderr,
+        level=WorkerConfig.LOG_LEVEL,
+        format="<green>{time:HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>"
+    )
+
+
+def signal_handler(sig, frame):
+    """Handle shutdown signals"""
+    logger.info("Shutdown signal received")
+    sys.exit(0)
+
+
+def main():
+    """Main entry point"""
+    setup_logging()
+    
+    logger.info("=" * 60)
+    logger.info("Detection Engine Starting...")
+    logger.info("=" * 60)
+    
+    # Register signal handlers
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    # Create and run engine
+    engine = DetectionEngine()
+    
+    try:
+        engine.run()
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Fatal error: {e}", exc_info=True)
+        raise
+    finally:
+        logger.info("Detection Engine stopped")
+
+
+if __name__ == "__main__":
+    main()

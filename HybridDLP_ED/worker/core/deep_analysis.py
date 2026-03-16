@@ -1,0 +1,247 @@
+"""
+Deep Analysis Module - OCR và ML Classification với Lazy Loading
+"""
+import psutil
+from pathlib import Path
+from typing import Dict, Optional, Any
+from loguru import logger
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from config import WorkerConfig
+
+
+class OCRProcessor:
+    """OCR Processor với điều kiện"""
+    
+    def __init__(self):
+        self.tesseract_loaded = False
+        self.pytesseract = None
+        self.Image = None
+        self.cv2 = None
+    
+    def _lazy_load_tesseract(self):
+        """Lazy load Tesseract chỉ khi cần"""
+        if not self.tesseract_loaded:
+            try:
+                import pytesseract
+                from PIL import Image
+                import cv2
+                
+                self.pytesseract = pytesseract
+                self.Image = Image
+                self.cv2 = cv2
+                self.tesseract_loaded = True
+                logger.info("Tesseract OCR loaded (lazy)")
+                return True
+            except ImportError as e:
+                logger.error(f"Failed to load OCR libraries: {e}")
+                return False
+        return True
+    
+    def should_ocr(self, file_path: Path) -> Dict[str, Any]:
+        """
+        Kiểm tra điều kiện OCR
+        
+        Returns:
+            {
+                'should_ocr': True/False,
+                'reason': '...',
+                'file_size_mb': 2.5,
+                'cpu_percent': 45.2
+            }
+        """
+        result = {
+            'should_ocr': False,
+            'reason': '',
+            'file_size_mb': 0,
+            'cpu_percent': 0
+        }
+        
+        if not WorkerConfig.OCR_ENABLED:
+            result['reason'] = "OCR disabled in config"
+            return result
+        
+        try:
+            # Check file size
+            file_size = file_path.stat().st_size
+            file_size_mb = file_size / (1024 * 1024)
+            result['file_size_mb'] = file_size_mb
+            
+            if file_size_mb > WorkerConfig.OCR_MAX_FILE_SIZE_MB:
+                result['reason'] = f"File too large: {file_size_mb:.2f}MB > {WorkerConfig.OCR_MAX_FILE_SIZE_MB}MB"
+                return result
+            
+            # Check CPU usage
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            result['cpu_percent'] = cpu_percent
+            
+            if cpu_percent > WorkerConfig.OCR_MAX_CPU_PERCENT:
+                result['reason'] = f"CPU too high: {cpu_percent:.1f}% > {WorkerConfig.OCR_MAX_CPU_PERCENT}%"
+                return result
+            
+            # Check file type
+            if not self._is_image_file(file_path):
+                result['reason'] = "Not an image file"
+                return result
+            
+            result['should_ocr'] = True
+            result['reason'] = "All conditions met"
+            
+        except Exception as e:
+            logger.error(f"Error checking OCR conditions: {e}")
+            result['reason'] = f"Error: {e}"
+        
+        return result
+    
+    def _is_image_file(self, file_path: Path) -> bool:
+        """Kiểm tra file có phải ảnh không (check header, không chỉ extension)"""
+        try:
+            # Check extension first (fast)
+            ext = file_path.suffix.lower()
+            if ext in WorkerConfig.OCR_SUPPORTED_FORMATS:
+                # If PDF, need special handling
+                if ext == '.pdf':
+                    return True
+                # For images, check header
+                try:
+                    with open(file_path, 'rb') as f:
+                        header = f.read(8)
+                        # JPEG: FF D8 FF
+                        if header[:3] == b'\xff\xd8\xff':
+                            return True
+                        # PNG: 89 50 4E 47
+                        if header[:4] == b'\x89PNG':
+                            return True
+                        # GIF: GIF87a or GIF89a
+                        if header[:4] in [b'GIF8', b'GIF9']:
+                            return True
+                except:
+                    pass
+            return False
+        except Exception as e:
+            logger.debug(f"Error checking file type: {e}")
+            return False
+    
+    def extract_text(self, file_path: Path) -> Optional[str]:
+        """Extract text từ ảnh bằng OCR"""
+        if not self._lazy_load_tesseract():
+            return None
+        
+        decision = self.should_ocr(file_path)
+        if not decision['should_ocr']:
+            logger.debug(f"Skipping OCR: {decision['reason']}")
+            return None
+        
+        try:
+            # Handle PDF (cần pdf2image, tạm thời skip)
+            if file_path.suffix.lower() == '.pdf':
+                logger.warning("PDF OCR not implemented yet (requires pdf2image)")
+                return None
+            
+            # Load image
+            image = self.Image.open(file_path)
+            
+            # OCR với Vietnamese language
+            text = self.pytesseract.image_to_string(
+                image,
+                lang='vie+eng'  # Vietnamese + English
+            )
+            
+            if text.strip():
+                logger.debug(f"OCR extracted {len(text)} characters from {file_path.name}")
+                return text.strip()
+            else:
+                logger.debug(f"No text extracted from {file_path.name}")
+                return None
+            
+        except Exception as e:
+            logger.error(f"OCR error for {file_path}: {e}")
+            return None
+
+
+class DeepAnalysisEngine:
+    """Deep Analysis Engine với Lazy Loading"""
+    
+    def __init__(self):
+        self.ocr_processor = OCRProcessor()
+        # ML Classifier sẽ được import lazy
+        self.ml_classifier = None
+    
+    def _lazy_load_ml(self):
+        """Lazy load ML classifier"""
+        if self.ml_classifier is None:
+            try:
+                import sys
+                from pathlib import Path
+                sys.path.insert(0, str(Path(__file__).parent.parent))
+                from models.ml_classifier import MLClassifier
+                self.ml_classifier = MLClassifier()
+            except ImportError as e:
+                logger.warning(f"ML Classifier not available: {e}")
+                return False
+        return True
+    
+    def analyze(self, file_path: Path, file_type: str, 
+                panic_mode: bool = False) -> Dict[str, Any]:
+        """
+        Deep Analysis: OCR + ML
+        
+        Args:
+            file_path: Đường dẫn file
+            file_type: MIME type của file
+            panic_mode: Nếu True, skip deep analysis
+        
+        Returns:
+            {
+                'ocr_text': '...',
+                'ml_result': {...},
+                'is_sensitive': True/False
+            }
+        """
+        result = {
+            'ocr_text': None,
+            'ml_result': None,
+            'is_sensitive': False
+        }
+        
+        # Skip deep analysis nếu panic mode
+        if panic_mode:
+            logger.debug("Skipping deep analysis (panic mode)")
+            return result
+        
+        try:
+            # 1. OCR (nếu là ảnh)
+            if file_type and ('image' in file_type or file_type == 'application/pdf'):
+                result['ocr_text'] = self.ocr_processor.extract_text(file_path)
+            
+            # 2. ML Classification (nếu có text)
+            text_to_classify = None
+            
+            # Lấy text từ OCR hoặc đọc file text
+            if result['ocr_text']:
+                text_to_classify = result['ocr_text']
+            elif file_type and 'text' in file_type:
+                # Đọc file text
+                try:
+                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                        text_to_classify = f.read(WorkerConfig.ML_MAX_TEXT_LENGTH)
+                except UnicodeDecodeError:
+                    # Try other encodings
+                    try:
+                        with open(file_path, 'r', encoding='latin-1', errors='ignore') as f:
+                            text_to_classify = f.read(WorkerConfig.ML_MAX_TEXT_LENGTH)
+                    except Exception as e:
+                        logger.debug(f"Error reading text file: {e}")
+                except Exception as e:
+                    logger.debug(f"Error reading text file: {e}")
+            
+            if text_to_classify and self._lazy_load_ml():
+                result['ml_result'] = self.ml_classifier.classify(text_to_classify)
+                if result['ml_result']:
+                    result['is_sensitive'] = result['ml_result'].get('is_sensitive', False)
+        
+        except Exception as e:
+            logger.error(f"Deep analysis error: {e}")
+        
+        return result

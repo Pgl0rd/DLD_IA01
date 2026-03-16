@@ -1,0 +1,617 @@
+from __future__ import annotations
+
+import os
+import time
+import json
+import signal
+import threading
+import sqlite3
+import glob
+import traceback
+from queue import Queue, Full, Empty
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Callable
+from datetime import datetime, timezone
+
+from agent.sensors.file_sensor import FileSystemSensor
+from agent.sensors.usb_sensor import USBSensor
+from agent.sensors.process_sensor import ProcessSensor
+from agent.sensors.network_sensor import NetworkSensor
+from agent.sensors.clipboard_sensor import ClipboardSensor
+from agent.sensors.context_correlator import ContextCorrelator
+from agent.queue_monitor import QueueMonitor
+from agent.sensors.context import ContextProvider
+
+try:
+    from agent.sensors.print_sensor import PrintSensor  # type: ignore
+    _HAS_PRINT = True
+except Exception:
+    PrintSensor = None  # type: ignore
+    _HAS_PRINT = False
+
+from agent.event_pipeline import canonicalize_event
+
+
+BASE_DIR = Path(__file__).resolve().parent
+RUNTIME_DIR = BASE_DIR / "runtime"
+STATE_DIR = RUNTIME_DIR / "state"
+STATE_DIR.mkdir(parents=True, exist_ok=True)
+
+HB_FILE = STATE_DIR / "sensor_heartbeat.json"
+PID_FILE = STATE_DIR / "sensor.pid"
+STOP_FLAG = STATE_DIR / "stop.flag"
+
+EVENTS_JSONL = RUNTIME_DIR / "events.jsonl"
+EVENTS_DB = RUNTIME_DIR / "events.db"
+
+
+def atomic_write_json(path: Path, data: dict) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    tmp.replace(path)
+
+
+def _to_unix(ts: Any) -> float:
+    if ts is None:
+        return time.time()
+    if isinstance(ts, (int, float)):
+        return float(ts)
+    try:
+        s = str(ts).strip()
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return time.time()
+
+
+def adapt_for_queue(evt: Dict[str, Any]) -> Dict[str, Any]:
+    e = dict(evt) if isinstance(evt, dict) else {"type": "unknown", "source": "unknown"}
+    e.setdefault("ts", time.time())
+    e["ts"] = _to_unix(e.get("ts"))
+    return e
+
+
+class JsonlFileSink:
+    def __init__(
+        self,
+        path: Path,
+        rotate_max_bytes: int = 50 * 1024 * 1024,
+        retention_days: int = 7,
+        cleanup_interval_sec: float = 300.0,
+    ):
+        self.base_path = path
+        self.base_dir = path.parent
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+
+        self.rotate_max_bytes = int(rotate_max_bytes)
+        self.retention_days = int(retention_days)
+        self.cleanup_interval_sec = float(cleanup_interval_sec)
+
+        self._lock = threading.Lock()
+        self._current_path = self._compute_current_path()
+        self._last_cleanup_ts = 0.0
+
+    def _today_str(self) -> str:
+        return datetime.now(timezone.utc).strftime("%Y%m%d")
+
+    def _compute_current_path(self) -> Path:
+        stem = self.base_path.stem
+        today = self._today_str()
+        pattern = str(self.base_dir / f"{stem}_{today}_*.jsonl")
+        existing = sorted(glob.glob(pattern))
+
+        if not existing:
+            return self.base_dir / f"{stem}_{today}_1.jsonl"
+
+        last = Path(existing[-1])
+        try:
+            if last.exists() and last.stat().st_size < self.rotate_max_bytes:
+                return last
+        except Exception:
+            return last
+
+        try:
+            n = int(last.stem.split("_")[-1]) + 1
+        except Exception:
+            n = len(existing) + 1
+        return self.base_dir / f"{stem}_{today}_{n}.jsonl"
+
+    def _needs_rollover(self) -> bool:
+        try:
+            today = self._today_str()
+            if today not in self._current_path.name:
+                return True
+            if self._current_path.exists() and self._current_path.stat().st_size >= self.rotate_max_bytes:
+                return True
+        except Exception:
+            return False
+        return False
+
+    def _cleanup_old(self) -> None:
+        if self.retention_days <= 0:
+            return
+        cutoff_ts = time.time() - (self.retention_days * 86400)
+
+        stem = self.base_path.stem
+        pattern = str(self.base_dir / f"{stem}_????????_*.jsonl")
+        for fp in glob.glob(pattern):
+            try:
+                p = Path(fp)
+                if p.stat().st_mtime < cutoff_ts:
+                    p.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+    def write(self, event: Dict[str, Any]) -> None:
+        line = json.dumps(event, ensure_ascii=False)
+        with self._lock:
+            if self._needs_rollover():
+                self._current_path = self._compute_current_path()
+
+            with self._current_path.open("a", encoding="utf-8") as f:
+                f.write(line + "\n")
+
+            now = time.time()
+            if now - self._last_cleanup_ts >= self.cleanup_interval_sec:
+                self._cleanup_old()
+                self._last_cleanup_ts = now
+
+    def close(self) -> None:
+        return
+
+
+class SQLiteEventStore:
+    def __init__(self, db_path: Path, commit_every: int = 50, commit_interval_sec: float = 2.0):
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self._lock = threading.Lock()
+
+        self.commit_every = int(max(1, commit_every))
+        self.commit_interval_sec = float(max(0.2, commit_interval_sec))
+        self._pending = 0
+        self._last_commit = time.time()
+
+        self._init_schema()
+
+    def _init_schema(self) -> None:
+        with self._lock:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    ts TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    severity INTEGER,
+                    source TEXT,
+                    payload_json TEXT
+                );
+                """
+            )
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);")
+            self.conn.execute("CREATE INDEX IF NOT EXISTS idx_events_type ON events(type);")
+            self.conn.commit()
+
+    def write(self, event: Dict[str, Any]) -> None:
+        payload = dict(event)
+        ts = str(payload.pop("ts", ""))
+        etype = str(payload.pop("type", "unknown"))
+        severity = payload.pop("severity", None)
+        source = payload.pop("source", None)
+        payload_json = json.dumps(payload, ensure_ascii=False)
+
+        with self._lock:
+            self.conn.execute(
+                "INSERT INTO events(ts, type, severity, source, payload_json) VALUES (?, ?, ?, ?, ?)",
+                (ts, etype, severity, source, payload_json),
+            )
+            self._pending += 1
+            now = time.time()
+            if self._pending >= self.commit_every or (now - self._last_commit) >= self.commit_interval_sec:
+                self.conn.commit()
+                self._pending = 0
+                self._last_commit = now
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                if self._pending > 0:
+                    self.conn.commit()
+            except Exception:
+                pass
+            try:
+                self.conn.close()
+            except Exception:
+                pass
+
+
+class QueueManager:
+    def __init__(self, maxsize: int):
+        self.event_queue: Queue = Queue(maxsize=maxsize)
+        self.enqueued = 0
+        self.dropped = 0
+        self.panic_mode = False
+        self._lock = threading.Lock()
+
+    def enqueue_event(self, event: Dict[str, Any]) -> bool:
+        event = adapt_for_queue(event)
+
+        if self.panic_mode:
+            allow_types = {
+                "heartbeat",
+                "shutdown",
+                "overload_drop_summary",
+                "proc_sensor_error",
+                "print_sensor_error",
+                "clipboard_sensor_error",
+                "net_sensor_error",
+                "network_sensor_error",
+                "usb_sensor_error",
+                "file_sensor_error",
+                "network_sensor_started",
+            }
+            if event.get("type") not in allow_types:
+                with self._lock:
+                    self.dropped += 1
+                return False
+
+        try:
+            self.event_queue.put_nowait(event)
+            with self._lock:
+                self.enqueued += 1
+            return True
+        except Full:
+            with self._lock:
+                self.dropped += 1
+            return False
+
+    def stats(self) -> Dict[str, Any]:
+        with self._lock:
+            return {
+                "qsize": self.event_queue.qsize(),
+                "maxsize": self.event_queue.maxsize,
+                "enqueued": self.enqueued,
+                "dropped": self.dropped,
+                "panic_mode": self.panic_mode,
+            }
+
+
+def consumer_loop(
+    stop_event: threading.Event,
+    qm: QueueManager,
+    sinks: List[Any],
+    correlator: Optional[ContextCorrelator] = None,
+) -> None:
+    while (not stop_event.is_set()) or (not qm.event_queue.empty()):
+        try:
+            event = qm.event_queue.get(timeout=0.5)
+        except Empty:
+            continue
+        except Exception:
+            continue
+
+        try:
+            if correlator is not None:
+                try:
+                    corr_events = correlator.on_event(event) or []
+                    for ce in corr_events:
+                        qm.enqueue_event(ce)
+                except Exception:
+                    pass
+
+            event_canon = canonicalize_event(event)
+            for s in sinks:
+                try:
+                    s.write(event_canon)
+                except Exception:
+                    pass
+        finally:
+            try:
+                qm.event_queue.task_done()
+            except Exception:
+                pass
+
+
+def heartbeat_loop(
+    stop_event: threading.Event,
+    qm: QueueManager,
+    hb_interval_sec: float,
+    hb_file_interval_sec: float,
+    start_ts: float,
+    ctx: Optional[ContextProvider],
+) -> None:
+    pid = os.getpid()
+    try:
+        PID_FILE.write_text(str(pid), encoding="utf-8")
+    except Exception:
+        pass
+
+    seq = 0
+    last_hb_file = 0.0
+
+    while not stop_event.is_set():
+        now = time.time()
+
+        if STOP_FLAG.exists():
+            stop_event.set()
+            break
+
+        seq += 1
+
+        context: Dict[str, Any] = {}
+        if ctx is not None:
+            try:
+                context = ctx.snapshot() or {}
+            except Exception:
+                context = {}
+
+        qm.enqueue_event(
+            {
+                "type": "heartbeat",
+                "severity": "info",
+                "source": "l1",
+                "pid": pid,
+                "seq": seq,
+                "start_ts": start_ts,
+                "context": context,
+                "ts": now,
+            }
+        )
+
+        if now - last_hb_file >= hb_file_interval_sec:
+            try:
+                atomic_write_json(
+                    HB_FILE,
+                    {
+                        "ts": int(now),
+                        "start_ts": int(start_ts),
+                        "role": "sensor",
+                        "pid": pid,
+                        "seq": seq,
+                        "queue": qm.stats(),
+                    },
+                )
+            except Exception:
+                pass
+            last_hb_file = now
+
+        time.sleep(hb_interval_sec)
+
+
+def _safe_call(fn: Callable[..., Any], *args, **kwargs) -> None:
+    try:
+        fn(*args, **kwargs)
+    except Exception:
+        pass
+
+
+def sensor_thread_runner(
+    sensor_name: str,
+    target: Callable[..., Any],
+    qm: QueueManager,
+    stop_event: threading.Event,
+    *args,
+) -> None:
+    try:
+        qm.enqueue_event(
+            {
+                "type": f"{sensor_name}_started",
+                "severity": "info",
+                "source": "l1",
+                "sensor": sensor_name,
+                "ts": time.time(),
+            }
+        )
+        target(*args)
+    except Exception as e:
+        qm.enqueue_event(
+            {
+                "type": f"{sensor_name}_error",
+                "severity": "high",
+                "source": "l1",
+                "sensor": sensor_name,
+                "error": repr(e),
+                "traceback": traceback.format_exc(),
+                "ts": time.time(),
+            }
+        )
+        stop_event.set()
+
+
+def main() -> None:
+    queue_maxsize = 8000
+
+    hb_interval_sec = 2.0
+    hb_file_interval_sec = 1.0
+
+    jsonl_rotate_max_bytes = 50 * 1024 * 1024
+    jsonl_retention_days = 7
+
+    sqlite_commit_every = 80
+    sqlite_commit_interval_sec = 2.0
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+
+    if STOP_FLAG.exists():
+        _safe_call(STOP_FLAG.unlink)
+
+    watch_test_dir = RUNTIME_DIR / "watch_test"
+    watch_test_dir.mkdir(parents=True, exist_ok=True)
+    watch_paths = [str(watch_test_dir)]
+
+    start_ts = time.time()
+    stop_event = threading.Event()
+    qm = QueueManager(maxsize=queue_maxsize)
+
+    sinks: List[Any] = [
+        JsonlFileSink(EVENTS_JSONL, rotate_max_bytes=jsonl_rotate_max_bytes, retention_days=jsonl_retention_days),
+        SQLiteEventStore(EVENTS_DB, commit_every=sqlite_commit_every, commit_interval_sec=sqlite_commit_interval_sec),
+    ]
+
+    qm_monitor = QueueMonitor(queue_manager=qm, state_dir=STATE_DIR, check_interval_sec=1.0)
+
+    correlator = ContextCorrelator(debug=True)
+
+    try:
+        ctx: Optional[ContextProvider] = ContextProvider(
+            cache_ttl_sec=0.5,
+            include_session=True,
+            include_exe_path=True,
+            include_cmdline=True,
+            include_net_snapshot=False,
+        )
+    except Exception:
+        ctx = None
+
+    fs_sensor = FileSystemSensor(queue_manager=qm, watch_paths=watch_paths, poll_interval_sec=0.5)
+    usb_sensor = USBSensor(queue_manager=qm, poll_interval_sec=1.0)
+
+    def on_usb_connected(drive: str) -> None:
+        _safe_call(fs_sensor.add_watch_path, drive)
+
+    clip_sensor = ClipboardSensor(
+        queue_manager=qm,
+        poll_interval_sec=0.15,
+        min_len=6,
+        preview_len=120,
+        cooldown_sec=0.6,
+    )
+
+    proc_watch = {
+        "powershell", "pwsh", "cmd", "wscript", "cscript", "python", "pythonw",
+        "curl", "wget", "rclone", "winscp", "filezilla", "pscp", "scp", "sftp", "robocopy",
+        "snippingtool", "screenclippinghost", "obs64", "obs32", "camtasia", "greenshot", "lightshot",
+        "autohotkey", "macrorecorder", "copyq", "ditto",
+    }
+
+    proc_sensor = ProcessSensor(
+        queue_manager=qm,
+        poll_interval_sec=0.5,
+        watch_names=proc_watch,
+        emit_end=True,
+        include_cmdline=True,
+        include_parent=True,
+        include_username=True,
+    )
+
+    net_sensor = NetworkSensor(
+        queue_manager=qm,
+        only_upload_processes=False,
+        prefer_sniff=True,
+        debug=True,
+        min_upload_bytes_browser=64 * 1024,
+        min_upload_bytes_tool=64 * 1024,
+        min_upload_bytes_default=128 * 1024,
+        min_upload_bytes_quic=64 * 1024,
+    )
+
+    print_sensor = None
+    if _HAS_PRINT:
+        try:
+            print_sensor = PrintSensor(queue_manager=qm, poll_interval_sec=1.0)  # type: ignore
+        except Exception:
+            print_sensor = None
+
+    print("[main] started pid=", os.getpid(), flush=True)
+    print("[main] watch_paths:", watch_paths, flush=True)
+    print("[main] print_sensor:", bool(print_sensor), flush=True)
+    print("[main] network_sensor: enabled", flush=True)
+    print("[main] entering run loop", flush=True)
+
+    threads: List[threading.Thread] = [
+        threading.Thread(name="consumer", target=consumer_loop, args=(stop_event, qm, sinks, correlator), daemon=True),
+        threading.Thread(name="heartbeat", target=heartbeat_loop, args=(stop_event, qm, hb_interval_sec, hb_file_interval_sec, start_ts, ctx), daemon=True),
+        threading.Thread(name="queue_monitor", target=qm_monitor.loop, args=(stop_event,), daemon=True),
+
+        threading.Thread(name="file_sensor", target=sensor_thread_runner, args=("file_sensor", fs_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
+        threading.Thread(name="usb_sensor", target=sensor_thread_runner, args=("usb_sensor", usb_sensor.run_loop, qm, stop_event, stop_event, on_usb_connected, None, ctx), daemon=True),
+        threading.Thread(name="clipboard_sensor", target=sensor_thread_runner, args=("clipboard_sensor", clip_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
+        threading.Thread(name="process_sensor", target=sensor_thread_runner, args=("process_sensor", proc_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
+        threading.Thread(name="network_sensor", target=sensor_thread_runner, args=("network_sensor", net_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
+    ]
+
+    if print_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="print_sensor",
+                target=sensor_thread_runner,
+                args=("print_sensor", print_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
+
+    for t in threads:
+        t.start()
+
+    def _handle_sig(sig, *_):
+        reason = "SIGINT" if sig == signal.SIGINT else "SIGTERM"
+        print("[main] got", reason, flush=True)
+
+        current_ctx: Dict[str, Any] = {}
+        if ctx:
+            try:
+                current_ctx = ctx.snapshot() or {}
+            except Exception:
+                current_ctx = {}
+
+        _safe_call(
+            qm.enqueue_event,
+            {
+                "type": "shutdown",
+                "severity": "info",
+                "source": "l1",
+                "reason": reason,
+                "pid": os.getpid(),
+                "start_ts": start_ts,
+                "context": current_ctx,
+                "ts": time.time(),
+            },
+        )
+        stop_event.set()
+
+    try:
+        signal.signal(signal.SIGINT, _handle_sig)
+        signal.signal(signal.SIGTERM, _handle_sig)
+    except Exception:
+        pass
+
+    try:
+        while not stop_event.is_set():
+            if STOP_FLAG.exists():
+                print("[main] stop.flag detected", flush=True)
+                _handle_sig(signal.SIGTERM)
+                break
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        _handle_sig(signal.SIGINT)
+
+    print("[main] stop_event set -> draining queue", flush=True)
+
+    drain_deadline = time.time() + 3.0
+    while time.time() < drain_deadline:
+        if qm.event_queue.empty():
+            break
+        time.sleep(0.1)
+
+    for t in threads:
+        try:
+            t.join(timeout=2.0)
+        except Exception:
+            pass
+
+    for s in sinks:
+        try:
+            if hasattr(s, "close"):
+                s.close()
+        except Exception:
+            pass
+
+    print("[main] exit", flush=True)
+
+
+if __name__ == "__main__":
+    main()

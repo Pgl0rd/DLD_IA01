@@ -1,0 +1,28 @@
+# Agent (L1) Requirements
+
+# Windows Service Support
+pywin32>=305
+
+# Database (SQLite is built-in, but may need additional tools)
+# sqlite3 is built-in
+
+# File System Monitoring
+# Uses Windows API via ctypes (built-in)
+
+# Network Monitoring
+# Uses socket (built-in)
+
+# Process Monitoring
+# Uses Windows API via ctypes (built-in)
+
+# USB Monitoring
+# Uses Windows API via ctypes (built-in)
+
+# Clipboard Monitoring
+# Uses Windows API via ctypes (built-in)
+
+# Context/Window Title
+# Uses Windows API via ctypes (built-in)
+
+# No additional external dependencies required
+# All functionality uses Python standard library and Windows API

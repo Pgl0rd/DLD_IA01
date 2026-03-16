@@ -1,0 +1,4 @@
+This is a normal document.
+It contains general information about the company.
+No sensitive data here.
+Just regular text for testing purposes.
