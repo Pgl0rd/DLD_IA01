@@ -158,7 +158,6 @@ def _extract_host_from_cmdline(cmdline: Optional[str]) -> Optional[str]:
 
     lowered = s.lower()
     hints = [
-        "authenticate.riotgames.com",
         "chatgpt.com",
         "chat.openai.com",
         "api.openai.com",
@@ -376,8 +375,6 @@ CLOUD_DOMAINS = [
     "bitbucket",
     "wetransfer",
     "mediafire",
-    "riotgames",
-    "riot",
     "leagueoflegends",
     "visualstudio",
     "vscode",
@@ -702,8 +699,6 @@ class NetworkSensor:
 
         if any(x in domain_l for x in ["chatgpt", "openai", "oaistatic"]) or "chatgpt" in title:
             return "chatgpt"
-        if "authenticate.riotgames.com" in domain_l or "riotgames" in cmd or "league_of_legends" in cmd:
-            return "riot-auth"
         if "github" in domain_l:
             return "github"
         if "dropbox" in domain_l:
@@ -738,8 +733,6 @@ class NetworkSensor:
             return "ai"
         if any(x in s for x in ["dropbox", "google-drive", "onedrive", "sharepoint", "github"]):
             return "cloud"
-        if "riot" in s:
-            return "gaming-auth"
         if "vscode" in s:
             return "developer-tool"
         if "browser" in s:

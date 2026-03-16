@@ -325,7 +325,9 @@ def _evt_window_title(evt: Dict[str, Any]) -> str:
 
 def _evt_dest_domain(evt: Dict[str, Any]) -> str:
     return str(
-        _get_nested(evt, "network.dest_domain", None)
+        _get_nested(evt, "network.resolved_domain", None)
+        or _get_nested(evt, "network.dest_domain", None)
+        or _get_nested(evt, "context.resolved_domain", None)
         or _get_nested(evt, "clipboard.dest_domain", None)
         or _get_nested(evt, "context.dest_domain", None)
         or _get_nested(evt, "context.domain", None)
@@ -347,6 +349,7 @@ def _evt_dest_url(evt: Dict[str, Any]) -> str:
 def _evt_dest_ip(evt: Dict[str, Any]) -> str:
     return str(
         _get_nested(evt, "network.dest_ip", None)
+        or _get_nested(evt, "context.dest_ip", None)
         or _get_nested(evt, "debug.evidence.dest_ip", None)
         or ""
     )
@@ -469,6 +472,40 @@ def _evt_type(evt: Dict[str, Any]) -> str:
     return str(evt.get("type") or "").lower()
 
 
+def _evt_service_name(evt: Dict[str, Any]) -> str:
+    return str(
+        _get_nested(evt, "operation.service_name", None)
+        or _get_nested(evt, "context.service_name", None)
+        or ""
+    ).lower()
+
+
+def _evt_service_category(evt: Dict[str, Any]) -> str:
+    return str(
+        _get_nested(evt, "operation.service_category", None)
+        or _get_nested(evt, "context.service_category", None)
+        or ""
+    ).lower()
+
+
+def _evt_resolved_from(evt: Dict[str, Any]) -> str:
+    return str(_get_nested(evt, "context.resolved_from", "") or "").lower()
+
+
+def _evt_method_inferred_only(evt: Dict[str, Any]) -> Optional[bool]:
+    v = _get_nested(evt, "debug.evidence.method_is_inferred_only", None)
+    if isinstance(v, bool):
+        return v
+    return None
+
+
+def _evt_content_type_inferred_only(evt: Dict[str, Any]) -> Optional[bool]:
+    v = _get_nested(evt, "debug.evidence.content_type_is_inferred_only", None)
+    if isinstance(v, bool):
+        return v
+    return None
+
+
 class ContextCorrelator:
     def __init__(
         self,
@@ -557,16 +594,27 @@ class ContextCorrelator:
         dest_url = _evt_dest_url(evt)
         title = _evt_window_title(evt)
         proc_name = _evt_actor_process_name(evt)
-        all_text = " ".join([dest_domain, dest_url, title, proc_name])
-        is_gpt = any(h in all_text for h in GPT_HINTS)
+        service_name = _evt_service_name(evt)
+        service_category = _evt_service_category(evt)
+
+        all_text = " ".join([dest_domain, dest_url, title, proc_name, service_name, service_category])
+
+        is_gpt = (
+            service_name == "chatgpt"
+            or service_category == "ai"
+            or any(h in all_text for h in GPT_HINTS)
+        )
         is_upload_hint = any(h in all_text for h in UPLOAD_DOMAIN_HINTS)
         is_browser = proc_name in BROWSER_PROCS
         is_transfer = proc_name in TRANSFER_PROCS
+
         return {
             "is_gpt": is_gpt,
             "is_upload_hint": is_upload_hint,
             "is_browser": is_browser,
             "is_transfer": is_transfer,
+            "service_name": service_name or None,
+            "service_category": service_category or None,
         }
 
     def _is_interesting_network_evt(self, evt: Dict[str, Any]) -> bool:
@@ -578,12 +626,15 @@ class ContextCorrelator:
         op_type = _evt_op_type(evt)
         method = str(_get_nested(evt, "network.method", "") or "").upper()
         title = _evt_window_title(evt)
+        service_name = _evt_service_name(evt)
+        service_category = _evt_service_category(evt)
 
         interesting_proc = proc_name in BROWSER_PROCS or proc_name in TRANSFER_PROCS
         interesting_dest = any(h in dest_domain for h in UPLOAD_DOMAIN_HINTS) or any(
             h in dest_url for h in UPLOAD_DOMAIN_HINTS
         )
         interesting_title = any(h in title for h in SENSITIVE_TITLE_HINTS)
+        interesting_service = bool(service_name or service_category)
 
         if etype in {
             "http_upload",
@@ -605,7 +656,7 @@ class ContextCorrelator:
         if interesting_proc and bytes_sent >= 32 * 1024:
             return True
 
-        if (interesting_dest or interesting_title) and bytes_sent >= 16 * 1024:
+        if (interesting_dest or interesting_title or interesting_service) and bytes_sent >= 16 * 1024:
             return True
 
         return False
@@ -669,6 +720,16 @@ class ContextCorrelator:
                 seen_sensitive = True
         return "Sensitive" if seen_sensitive else None
 
+    def _has_file_evidence(self, evt: Dict[str, Any], staging_paths: List[str], clip_evidence: List[Dict[str, Any]]) -> bool:
+        if _evt_path(evt) or _evt_dst_path(evt):
+            return True
+        if staging_paths:
+            return True
+        for c in clip_evidence:
+            if str(c.get("content_type") or "").lower() == "filelist":
+                return True
+        return False
+
     def _build_actor(self, evt: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "user": _evt_actor_user(evt),
@@ -696,21 +757,30 @@ class ContextCorrelator:
             "fg_domain": ctx.get("fg_domain") or _evt_dest_domain(evt) or None,
             "domain": ctx.get("domain") or _evt_dest_domain(evt) or None,
             "dest_domain": ctx.get("dest_domain") or _evt_dest_domain(evt) or None,
+            "resolved_domain": ctx.get("resolved_domain") or _evt_dest_domain(evt) or None,
+            "resolved_from": ctx.get("resolved_from") or _evt_resolved_from(evt) or None,
+            "dest_ip": ctx.get("dest_ip") or _evt_dest_ip(evt) or None,
             "fg_url_hint": ctx.get("fg_url_hint") or _evt_dest_url(evt) or None,
             "net_snapshot": ctx.get("net_snapshot"),
+            "service_name": ctx.get("service_name") or _evt_service_name(evt) or None,
+            "service_category": ctx.get("service_category") or _evt_service_category(evt) or None,
         }
 
     def _build_network_block(self, evt: Dict[str, Any], bytes_sent: Optional[int] = None) -> Dict[str, Any]:
         b = _evt_bytes_sent(evt) if bytes_sent is None else bytes_sent
         return {
             "dest_domain": _evt_dest_domain(evt) or None,
+            "resolved_domain": _get_nested(evt, "network.resolved_domain", None) or _evt_dest_domain(evt) or None,
             "dest_url": _evt_dest_url(evt) or None,
             "dest_ip": _evt_dest_ip(evt) or None,
+            "dest_host_display": _get_nested(evt, "network.dest_host_display", None),
             "protocol_type": _get_nested(evt, "network.protocol_type", None),
             "dst_port": _get_nested(evt, "network.dst_port", None),
             "method": _get_nested(evt, "network.method", None),
             "content_type": _get_nested(evt, "network.content_type", None),
             "external_dst": _get_nested(evt, "network.external_dst", None),
+            "dns_correlated": _get_nested(evt, "network.dns_correlated", None),
+            "dns_cache_domain": _get_nested(evt, "network.dns_cache_domain", None),
             "bytes_sent_total": b,
             "bytes_out_total": b,
             "bytes_in_total": _get_nested(evt, "network.bytes_in_total", None),
@@ -917,116 +987,154 @@ class ContextCorrelator:
                     context_block = self._build_context(evt)
                     network_block = self._build_network_block(evt, bytes_sent=bytes_sent)
                     target = self._classify_network_target(evt)
-                    severity = "high" if target["is_gpt"] or bytes_sent >= 256 * 1024 or staged_path else "warn"
-                    key = f"upload:{proc_name}:{dest_domain}:{dest_ip}:{bytes_sent // 1024}:{target['is_gpt']}"
 
-                    if self._dedupe_ok(key, now_unix):
-                        corr_raw = {
-                            "type": "corr_suspected_upload",
-                            "source": "correlator",
-                            "severity": _sev(severity),
-                            "ts": _iso_from_ts(now_unix),
-                            "tags": [
-                                "corr_upload",
-                                "upload",
-                                "network",
-                            ] + (["gpt"] if target["is_gpt"] else []),
-                            "actor": self._build_actor(evt),
-                            "context": context_block,
-                            "operation": {
-                                "op_type": "corr_gpt_upload" if target["is_gpt"] else "corr_suspected_upload",
-                                "tool": proc_name or context_block.get("fg_app"),
-                            },
-                            "object": {
-                                "path": staged_path,
-                                "dst_path": None,
-                                "drive": None,
-                                "volume_type": None,
-                                "dest": dest_domain or dest_url or dest_ip or None,
-                                "bytes": bytes_sent,
-                                "sensitivity": self._recent_staging_sensitivity(),
-                                "cloud_provider": "gpt" if target["is_gpt"] else ("cloud" if target["is_upload_hint"] else None),
-                            },
-                            "network": network_block,
-                            "debug": {
-                                "evidence": {
-                                    "process": proc_name,
-                                    "dest_ip": dest_ip,
-                                    "dest_domain": dest_domain,
-                                    "dest_url": dest_url,
-                                    "bytes_sent_total": bytes_sent,
-                                    "recent_staging": staging_ids,
-                                    "recent_staging_paths": staging_paths,
-                                    "recent_clipboard": clip_evidence,
-                                    "source_event_type": etype,
-                                    "source_op_type": op_type,
-                                    "is_browser_proc": target["is_browser"],
-                                    "is_transfer_proc": target["is_transfer"],
-                                    "is_gpt_destination": target["is_gpt"],
-                                    "is_upload_hint_destination": target["is_upload_hint"],
-                                    "window_title": context_block.get("window_title"),
-                                    "fg_app": context_block.get("fg_app"),
-                                    "fg_process": context_block.get("fg_process"),
-                                    "fg_pid": context_block.get("fg_pid"),
-                                    "fg_domain": context_block.get("fg_domain"),
-                                    "fg_url_hint": context_block.get("fg_url_hint"),
-                                    "method_is_inferred_only": _get_nested(evt, "debug.evidence.method_is_inferred_only", None),
-                                    "content_type_is_inferred_only": _get_nested(evt, "debug.evidence.content_type_is_inferred_only", None),
-                                    "threshold_used": _get_nested(evt, "debug.evidence.threshold_used", None),
-                                    "parent_name": _get_nested(evt, "process.parent_name", None),
-                                    "parent_cmdline": _get_nested(evt, "debug.evidence.parent_cmdline", None),
-                                }
-                            },
-                        }
-                        self._dbg("corr_suspected_upload", dest_domain, bytes_sent, proc_name, "gpt=", target["is_gpt"])
-                        out.append(self._make_corr(corr_raw, now_unix))
+                    has_file_evidence = self._has_file_evidence(evt, staging_paths, clip_evidence)
+                    inferred_only = (
+                        _evt_method_inferred_only(evt) is True
+                        and _evt_content_type_inferred_only(evt) is True
+                    )
 
-                        if target["is_gpt"]:
-                            gpt_key = f"gpt_upload:{proc_name}:{dest_domain}:{dest_ip}:{bytes_sent // 1024}"
-                            if self._dedupe_ok(gpt_key, now_unix):
-                                gpt_raw = {
-                                    "type": "corr_gpt_upload_suspected",
-                                    "source": "correlator",
-                                    "severity": _sev("high"),
-                                    "ts": _iso_from_ts(now_unix),
-                                    "tags": ["corr_upload", "upload", "network", "gpt", "chatgpt"],
-                                    "actor": self._build_actor(evt),
-                                    "context": context_block,
-                                    "operation": {
-                                        "op_type": "corr_gpt_upload_suspected",
-                                        "tool": proc_name or context_block.get("fg_app"),
-                                    },
-                                    "object": {
-                                        "path": staged_path,
-                                        "dst_path": None,
-                                        "drive": None,
-                                        "volume_type": None,
-                                        "dest": dest_domain or dest_url or dest_ip or None,
-                                        "bytes": bytes_sent,
-                                        "sensitivity": self._recent_staging_sensitivity(),
-                                        "cloud_provider": "gpt",
-                                    },
-                                    "network": network_block,
-                                    "debug": {
-                                        "evidence": {
-                                            "reason": "destination_or_context_matched_gpt",
-                                            "recent_staging": staging_ids,
-                                            "recent_staging_paths": staging_paths,
-                                            "recent_clipboard": clip_evidence,
-                                            "window_title": context_block.get("window_title"),
-                                            "fg_url_hint": context_block.get("fg_url_hint"),
-                                            "dest_domain": dest_domain,
-                                            "dest_url": dest_url,
-                                            "dest_ip": dest_ip,
-                                            "bytes_sent_total": bytes_sent,
-                                            "source_event_type": etype,
-                                            "source_op_type": op_type,
-                                        }
-                                    },
-                                }
-                                out.append(self._make_corr(gpt_raw, now_unix))
+                    # Không bắn 2 event trùng nhau nữa.
+                    if target["is_gpt"]:
+                        corr_type = "corr_gpt_file_upload_suspected" if has_file_evidence else "corr_gpt_data_send_suspected"
+                        corr_op_type = corr_type
+                        severity = "high" if has_file_evidence else ("warn" if inferred_only else "high")
+                        tags = ["corr_upload", "upload", "network", "gpt", "chatgpt"]
+                        dedupe_key = f"{corr_type}:{proc_name}:{dest_domain}:{dest_ip}:{bytes_sent // 1024}:{bool(has_file_evidence)}"
 
-                if self._staging_recent:
+                        if self._dedupe_ok(dedupe_key, now_unix):
+                            corr_raw = {
+                                "type": corr_type,
+                                "source": "correlator",
+                                "severity": _sev(severity),
+                                "ts": _iso_from_ts(now_unix),
+                                "tags": tags,
+                                "actor": self._build_actor(evt),
+                                "context": context_block,
+                                "operation": {
+                                    "op_type": corr_op_type,
+                                    "tool": proc_name or context_block.get("fg_app"),
+                                    "service_name": target.get("service_name"),
+                                    "service_category": target.get("service_category"),
+                                },
+                                "object": {
+                                    "path": staged_path if has_file_evidence else None,
+                                    "dst_path": None,
+                                    "drive": None,
+                                    "volume_type": None,
+                                    "dest": dest_domain or dest_url or dest_ip or None,
+                                    "bytes": bytes_sent,
+                                    "sensitivity": self._recent_staging_sensitivity(),
+                                    "cloud_provider": "gpt",
+                                },
+                                "network": network_block,
+                                "debug": {
+                                    "evidence": {
+                                        "reason": "destination_or_context_matched_gpt",
+                                        "process": proc_name,
+                                        "dest_ip": dest_ip,
+                                        "dest_domain": dest_domain,
+                                        "dest_url": dest_url,
+                                        "bytes_sent_total": bytes_sent,
+                                        "recent_staging": staging_ids,
+                                        "recent_staging_paths": staging_paths,
+                                        "recent_clipboard": clip_evidence,
+                                        "source_event_type": etype,
+                                        "source_op_type": op_type,
+                                        "window_title": context_block.get("window_title"),
+                                        "fg_app": context_block.get("fg_app"),
+                                        "fg_process": context_block.get("fg_process"),
+                                        "fg_pid": context_block.get("fg_pid"),
+                                        "fg_domain": context_block.get("fg_domain"),
+                                        "fg_url_hint": context_block.get("fg_url_hint"),
+                                        "service_name": target.get("service_name"),
+                                        "service_category": target.get("service_category"),
+                                        "resolved_from": context_block.get("resolved_from"),
+                                        "has_file_evidence": has_file_evidence,
+                                        "is_browser_proc": target["is_browser"],
+                                        "is_transfer_proc": target["is_transfer"],
+                                        "is_gpt_destination": True,
+                                        "is_upload_hint_destination": target["is_upload_hint"],
+                                        "method_is_inferred_only": _evt_method_inferred_only(evt),
+                                        "content_type_is_inferred_only": _evt_content_type_inferred_only(evt),
+                                        "threshold_used": _get_nested(evt, "debug.evidence.threshold_used", None),
+                                    }
+                                },
+                            }
+                            self._dbg(corr_type, dest_domain, bytes_sent, proc_name, "file_evidence=", has_file_evidence)
+                            out.append(self._make_corr(corr_raw, now_unix))
+
+                    else:
+                        severity = "high" if bytes_sent >= 256 * 1024 or staged_path else "warn"
+                        key = f"upload:{proc_name}:{dest_domain}:{dest_ip}:{bytes_sent // 1024}:{target['is_gpt']}"
+
+                        if self._dedupe_ok(key, now_unix):
+                            corr_raw = {
+                                "type": "corr_suspected_upload",
+                                "source": "correlator",
+                                "severity": _sev(severity),
+                                "ts": _iso_from_ts(now_unix),
+                                "tags": [
+                                    "corr_upload",
+                                    "upload",
+                                    "network",
+                                ],
+                                "actor": self._build_actor(evt),
+                                "context": context_block,
+                                "operation": {
+                                    "op_type": "corr_suspected_upload",
+                                    "tool": proc_name or context_block.get("fg_app"),
+                                    "service_name": target.get("service_name"),
+                                    "service_category": target.get("service_category"),
+                                },
+                                "object": {
+                                    "path": staged_path,
+                                    "dst_path": None,
+                                    "drive": None,
+                                    "volume_type": None,
+                                    "dest": dest_domain or dest_url or dest_ip or None,
+                                    "bytes": bytes_sent,
+                                    "sensitivity": self._recent_staging_sensitivity(),
+                                    "cloud_provider": "cloud" if target["is_upload_hint"] else None,
+                                },
+                                "network": network_block,
+                                "debug": {
+                                    "evidence": {
+                                        "process": proc_name,
+                                        "dest_ip": dest_ip,
+                                        "dest_domain": dest_domain,
+                                        "dest_url": dest_url,
+                                        "bytes_sent_total": bytes_sent,
+                                        "recent_staging": staging_ids,
+                                        "recent_staging_paths": staging_paths,
+                                        "recent_clipboard": clip_evidence,
+                                        "source_event_type": etype,
+                                        "source_op_type": op_type,
+                                        "is_browser_proc": target["is_browser"],
+                                        "is_transfer_proc": target["is_transfer"],
+                                        "is_gpt_destination": False,
+                                        "is_upload_hint_destination": target["is_upload_hint"],
+                                        "window_title": context_block.get("window_title"),
+                                        "fg_app": context_block.get("fg_app"),
+                                        "fg_process": context_block.get("fg_process"),
+                                        "fg_pid": context_block.get("fg_pid"),
+                                        "fg_domain": context_block.get("fg_domain"),
+                                        "fg_url_hint": context_block.get("fg_url_hint"),
+                                        "service_name": target.get("service_name"),
+                                        "service_category": target.get("service_category"),
+                                        "resolved_from": context_block.get("resolved_from"),
+                                        "method_is_inferred_only": _evt_method_inferred_only(evt),
+                                        "content_type_is_inferred_only": _evt_content_type_inferred_only(evt),
+                                        "threshold_used": _get_nested(evt, "debug.evidence.threshold_used", None),
+                                        "parent_name": _get_nested(evt, "process.parent_name", None),
+                                        "parent_cmdline": _get_nested(evt, "debug.evidence.parent_cmdline", None),
+                                    }
+                                },
+                            }
+                            self._dbg("corr_suspected_upload", dest_domain, bytes_sent, proc_name)
+                            out.append(self._make_corr(corr_raw, now_unix))
+
+                if self._staging_recent and not _classify_network_target_is_gpt_safe(evt=self._classify_network_target(evt)):
                     dest_domain = _evt_dest_domain(evt)
                     bytes_sent = _evt_bytes_sent(evt)
                     key = f"net_exfil:{dest_domain}:{bytes_sent // 1024}"
@@ -1179,3 +1287,10 @@ class ContextCorrelator:
             return out
 
         return out
+
+
+def _classify_network_target_is_gpt_safe(evt: Dict[str, Any]) -> bool:
+    try:
+        return bool(evt.get("is_gpt"))
+    except Exception:
+        return False

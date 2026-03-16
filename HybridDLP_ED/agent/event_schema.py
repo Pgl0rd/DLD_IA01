@@ -145,11 +145,14 @@ def empty_event() -> Dict[str, Any]:
             "create_time": None,
             "username": None,
             "parent_name": None,
+            "parent_cmdline": None,
         },
 
         "operation": {
             "op_type": None,
             "tool": None,
+            "service_name": None,
+            "service_category": None,
         },
 
         "object": {
@@ -185,6 +188,7 @@ def empty_event() -> Dict[str, Any]:
             "cloud_provider": None,
             "bytes": None,
             "dest": None,
+            "dest_display": None,
         },
 
         "context": {
@@ -204,8 +208,13 @@ def empty_event() -> Dict[str, Any]:
             "fg_domain": None,
             "domain": None,
             "dest_domain": None,
+            "resolved_domain": None,
+            "resolved_from": None,
+            "dest_ip": None,
             "fg_url_hint": None,
             "net_snapshot": None,
+            "service_name": None,
+            "service_category": None,
         },
 
         "metrics": {
@@ -339,7 +348,9 @@ def empty_event() -> Dict[str, Any]:
 
             "dest_ip": None,
             "dest_domain": None,
+            "resolved_domain": None,
             "dest_url": None,
+            "dest_host_display": None,
             "protocol_type": None,
             "dst_port": None,
 
@@ -348,6 +359,8 @@ def empty_event() -> Dict[str, Any]:
 
             "dest_trust_level": None,
             "external_dst": None,
+            "dns_correlated": None,
+            "dns_cache_domain": None,
 
             "transfer_volume_window": None,
             "window_sec": None,
@@ -466,12 +479,15 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "create_time": process.get("create_time"),
         "username": first_non_empty(process.get("username"), actor.get("username"), actor.get("user")),
         "parent_name": process.get("parent_name"),
+        "parent_cmdline": process.get("parent_cmdline"),
     })
 
     # operation
     e["operation"].update({
         "op_type": first_non_empty(operation.get("op_type"), raw.get("type")),
         "tool": operation.get("tool"),
+        "service_name": operation.get("service_name"),
+        "service_category": operation.get("service_category"),
     })
 
     # object
@@ -506,6 +522,7 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "cloud_provider": first_non_empty(obj.get("cloud_provider"), raw.get("Cloud_Provider")),
         "bytes": first_non_empty(obj.get("bytes"), raw.get("bytes")),
         "dest": first_non_empty(obj.get("dest"), raw.get("dest")),
+        "dest_display": first_non_empty(obj.get("dest_display"), raw.get("dest_display")),
     })
 
     # context
@@ -523,11 +540,16 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "session": ctx.get("session"),
         "process_tags": ctx.get("process_tags"),
         "outside_working_hours": ctx.get("outside_working_hours"),
-        "fg_domain": first_non_empty(ctx.get("fg_domain"), net.get("dest_domain"), clipboard.get("dest_domain")),
-        "domain": first_non_empty(ctx.get("domain"), ctx.get("fg_domain"), net.get("dest_domain"), clipboard.get("dest_domain")),
-        "dest_domain": first_non_empty(ctx.get("dest_domain"), net.get("dest_domain"), clipboard.get("dest_domain")),
+        "fg_domain": first_non_empty(ctx.get("fg_domain"), net.get("resolved_domain"), net.get("dest_domain"), clipboard.get("dest_domain")),
+        "domain": first_non_empty(ctx.get("domain"), ctx.get("resolved_domain"), ctx.get("fg_domain"), net.get("resolved_domain"), net.get("dest_domain"), clipboard.get("dest_domain")),
+        "dest_domain": first_non_empty(ctx.get("dest_domain"), ctx.get("resolved_domain"), net.get("resolved_domain"), net.get("dest_domain"), clipboard.get("dest_domain")),
+        "resolved_domain": first_non_empty(ctx.get("resolved_domain"), net.get("resolved_domain"), net.get("dest_domain")),
+        "resolved_from": ctx.get("resolved_from"),
+        "dest_ip": first_non_empty(ctx.get("dest_ip"), net.get("dest_ip")),
         "fg_url_hint": first_non_empty(ctx.get("fg_url_hint"), net.get("dest_url"), clipboard.get("dest_domain")),
         "net_snapshot": ctx.get("net_snapshot"),
+        "service_name": first_non_empty(ctx.get("service_name"), operation.get("service_name")),
+        "service_category": first_non_empty(ctx.get("service_category"), operation.get("service_category")),
     })
 
     # metrics
@@ -663,9 +685,11 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "action": net.get("action"),
         "reason": net.get("reason"),
 
-        "dest_ip": first_non_empty(net.get("dest_ip")),
-        "dest_domain": first_non_empty(net.get("dest_domain"), ctx.get("dest_domain"), ctx.get("domain"), ctx.get("fg_domain")),
+        "dest_ip": first_non_empty(net.get("dest_ip"), ctx.get("dest_ip")),
+        "dest_domain": first_non_empty(net.get("dest_domain"), net.get("resolved_domain"), ctx.get("resolved_domain"), ctx.get("dest_domain"), ctx.get("domain"), ctx.get("fg_domain")),
+        "resolved_domain": first_non_empty(net.get("resolved_domain"), net.get("dest_domain"), ctx.get("resolved_domain"), ctx.get("dest_domain")),
         "dest_url": first_non_empty(net.get("dest_url"), ctx.get("fg_url_hint")),
+        "dest_host_display": first_non_empty(net.get("dest_host_display")),
         "protocol_type": net.get("protocol_type"),
         "dst_port": net.get("dst_port"),
 
@@ -674,6 +698,8 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
 
         "dest_trust_level": net.get("dest_trust_level"),
         "external_dst": net.get("external_dst"),
+        "dns_correlated": net.get("dns_correlated"),
+        "dns_cache_domain": net.get("dns_cache_domain"),
 
         "transfer_volume_window": net.get("transfer_volume_window"),
         "window_sec": net.get("window_sec"),
