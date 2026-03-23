@@ -12,6 +12,27 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
 
 
+def classify_risk_level(total_score: float) -> str:
+    """
+    Ánh xạ điểm rủi ro tổng (0–100) sang mức: low | medium | high | critical.
+    Ngưỡng cấu hình trong WorkerConfig (RISK_LEVEL_*_MAX).
+    """
+    try:
+        s = float(total_score)
+    except (TypeError, ValueError):
+        return "low"
+    low_m = WorkerConfig.RISK_LEVEL_LOW_MAX
+    med_m = WorkerConfig.RISK_LEVEL_MEDIUM_MAX
+    high_m = WorkerConfig.RISK_LEVEL_HIGH_MAX
+    if s < low_m:
+        return "low"
+    if s < med_m:
+        return "medium"
+    if s < high_m:
+        return "high"
+    return "critical"
+
+
 class RiskScoringEngine:
     """Tính toán Risk Score"""
     
@@ -85,12 +106,19 @@ class RiskScoringEngine:
             'ml_sensitive': deep_analysis_result.get('is_sensitive', False)
         }
         
-        # 2. Behavior Score (30%)
-        behavior_score = self._calculate_behavior_score(event_context)
+        # 2. Behavior Score (30%) — gộp điểm anomaly UEBA/Isolation Forest (0–100) vào kênh hành vi
+        # S_behavior = min(100, S_behavior^0 + β · S_anomaly), β = ML_ANOMALY_BEHAVIOR_BLEND
+        behavior_base = self._calculate_behavior_score(event_context)
+        ml_anomaly = float(event_context.get("ml_anomaly_score") or 0.0)
+        blend = WorkerConfig.ML_ANOMALY_BEHAVIOR_BLEND
+        behavior_score = min(100.0, behavior_base + ml_anomaly * blend)
         scores['behavior_score'] = behavior_score
         details['behavior'] = {
             'action_type': event_context.get('action_type', 'unknown'),
-            'destination': event_context.get('destination', 'unknown')
+            'destination': event_context.get('destination', 'unknown'),
+            'behavior_base': round(behavior_base, 2),
+            'ml_anomaly_score': round(ml_anomaly, 2),
+            'ml_anomaly_behavior_blend': blend,
         }
         
         # 3. Context Score (20%)
@@ -111,12 +139,15 @@ class RiskScoringEngine:
         
         # Quyết định hành động
         action = self._determine_action(total_score)
+        risk_level = classify_risk_level(total_score)
         
         return {
             'total_score': round(total_score, 2),
             **scores,
             'action': action,
-            'details': details
+            'risk_level': risk_level,
+            'details': details,
+            'method': 'traditional',
         }
     
     def _calculate_content_score(self, 
@@ -494,11 +525,13 @@ class ResearchBasedRiskScoringEngine:
         
         # Determine action
         action = self._determine_action(total_score)
+        risk_level = classify_risk_level(total_score)
         
         return {
             'total_score': round(total_score, 2),
             **scores,
             'action': action,
+            'risk_level': risk_level,
             'details': details,
             'method': 'research_based'
         }
@@ -853,12 +886,15 @@ class NISTBasedRiskScoringEngine:
             # Quyết định action (alert/log)
             action = self._determine_action(total_score)
         
+        risk_level = classify_risk_level(total_score)
+        
         return {
             "total_score": round(total_score, 2),
             "likelihood": round(likelihood, 2),
             "impact": round(impact, 2),
             "risk_raw": round(risk_raw, 2),
             "action": action,
+            "risk_level": risk_level,
             "details": details,
             "method": "nist_based",
         }

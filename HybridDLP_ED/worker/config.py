@@ -83,10 +83,20 @@ class WorkerConfig:
         'alert': 40,  # Lowered from 50 to 40 for more sensitive detection
         'log': 0
     }
+
+    # Phân loại mức độ rủi ro trên thang điểm tổng 0–100 (điều chỉnh được qua biến môi trường)
+    # low: [0, low_max), medium: [low_max, medium_max), high: [medium_max, high_max), critical: [high_max, 100]
+    RISK_LEVEL_LOW_MAX = float(os.getenv("RISK_LEVEL_LOW_MAX", "25"))
+    RISK_LEVEL_MEDIUM_MAX = float(os.getenv("RISK_LEVEL_MEDIUM_MAX", "50"))
+    RISK_LEVEL_HIGH_MAX = float(os.getenv("RISK_LEVEL_HIGH_MAX", "75"))
     
     # ML Anomaly Detection Thresholds
     ML_ANOMALY_THRESHOLD = float(os.getenv('ML_ANOMALY_THRESHOLD', '70.0'))  # Score > 70 = anomaly (lowered from 75)
     ML_ANOMALY_BOOST_THRESHOLD = float(os.getenv('ML_ANOMALY_BOOST_THRESHOLD', '70.0'))  # Threshold for likelihood boost
+
+    # Phương pháp traditional: điểm anomaly UEBA (0–100) gộp vào Behavior score
+    # S_behavior = min(100, S_behavior^0 + β * S_anomaly), β = ML_ANOMALY_BEHAVIOR_BLEND
+    ML_ANOMALY_BEHAVIOR_BLEND = float(os.getenv("ML_ANOMALY_BEHAVIOR_BLEND", "0.25"))
     
     # Behavioral Risk Boost Values
     BEHAVIORAL_RISK_BOOST = {
