@@ -130,11 +130,18 @@ class ClipboardSensor(SensorBase):
         kernel32 = ctypes.windll.kernel32
         self._hook_user32 = user32
 
+        from ctypes import wintypes
+        
+        kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+        kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+
         WH_KEYBOARD_LL = 13
         WM_KEYDOWN = 0x0100
         WM_SYSKEYDOWN = 0x0104
         VK_V = 0x56
+        VK_INSERT = 0x2D
         VK_CONTROL = 0x11
+        VK_SHIFT = 0x10
 
         class KBDLLHOOKSTRUCT(ctypes.Structure):
             _fields_ = [
@@ -148,9 +155,17 @@ class ClipboardSensor(SensorBase):
         LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
             ctypes.c_long,
             ctypes.c_int,
-            ctypes.c_ulong,
-            ctypes.c_void_p,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
         )
+
+        user32.SetWindowsHookExW.restype = ctypes.c_void_p
+        user32.SetWindowsHookExW.argtypes = [
+            ctypes.c_int,
+            LowLevelKeyboardProc,
+            wintypes.HMODULE,
+            wintypes.DWORD
+        ]
 
         def hook_proc(n_code, w_param, l_param):
             if n_code >= 0 and w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
@@ -158,6 +173,10 @@ class ClipboardSensor(SensorBase):
                 if kb.vkCode == VK_V:
                     ctrl_down = user32.GetAsyncKeyState(VK_CONTROL) & 0x8000
                     if ctrl_down:
+                        self._register_paste_event()
+                elif kb.vkCode == VK_INSERT:
+                    shift_down = user32.GetAsyncKeyState(VK_SHIFT) & 0x8000
+                    if shift_down:
                         self._register_paste_event()
             return user32.CallNextHookEx(self._hook_id, n_code, w_param, l_param)
 
@@ -167,7 +186,7 @@ class ClipboardSensor(SensorBase):
         if not self._hook_id:
             return
 
-        msg = ctypes.wintypes.MSG()
+        msg = wintypes.MSG()
         while not self._hook_stop_event.is_set():
             result = user32.GetMessageW(ctypes.byref(msg), 0, 0, 0)
             if result <= 0:

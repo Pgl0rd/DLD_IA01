@@ -989,6 +989,8 @@ class ContextCorrelator:
                     target = self._classify_network_target(evt)
 
                     has_file_evidence = self._has_file_evidence(evt, staging_paths, clip_evidence)
+                    if has_file_evidence and not staged_path:
+                        staged_path = _evt_path(evt) or _evt_dst_path(evt) or None
                     inferred_only = (
                         _evt_method_inferred_only(evt) is True
                         and _evt_content_type_inferred_only(evt) is True
@@ -1094,7 +1096,7 @@ class ContextCorrelator:
                                     "volume_type": None,
                                     "dest": dest_domain or dest_url or dest_ip or None,
                                     "bytes": bytes_sent,
-                                    "sensitivity": self._recent_staging_sensitivity(),
+                                    "sensitivity": self._recent_staging_sensitivity() or _evt_file_sensitivity(evt) or None,
                                     "cloud_provider": "cloud" if target["is_upload_hint"] else None,
                                 },
                                 "network": network_block,

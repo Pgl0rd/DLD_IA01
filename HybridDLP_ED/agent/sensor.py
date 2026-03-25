@@ -20,6 +20,7 @@ from agent.sensors.network_sensor import NetworkSensor
 from agent.sensors.clipboard_sensor import ClipboardSensor
 from agent.sensors.context_correlator import ContextCorrelator
 from agent.sensors.endpoint_sensor import EndpointSensor
+from agent.sensors.browser_upload_sensor import BrowserUploadSensor
 from agent.queue_monitor import QueueMonitor
 from agent.sensors.context import ContextProvider
 
@@ -572,6 +573,17 @@ def main() -> None:
     print("[main] print_sensor:", bool(print_sensor), flush=True)
     print(f"[main] network_sensor: enabled (prefer_sniff={prefer_sniff}, enforce_upload_gate={enforce_upload_gate}, gate_hold_sec={gate_hold_sec})", flush=True)
     print("[main] endpoint_sensor: enabled (open/read/close + metadata/content in object)", flush=True)
+    # Browser upload sensor (optional): TCP server that receives newline-delimited JSON
+    # from browser native messaging host.
+    browser_upload_enabled = os.getenv("BROWSER_UPLOAD_SENSOR", "0").strip().lower() in {"1", "true", "yes", "on"}
+    browser_upload_host = os.getenv("BROWSER_UPLOAD_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    browser_upload_port = int(os.getenv("BROWSER_UPLOAD_PORT", "47266"))
+    browser_upload_sensor = None
+    if browser_upload_enabled:
+        browser_upload_sensor = BrowserUploadSensor(queue_manager=qm, host=browser_upload_host, port=browser_upload_port)
+        print(f"[main] browser_upload_sensor: enabled on {browser_upload_host}:{browser_upload_port}", flush=True)
+    else:
+        print("[main] browser_upload_sensor: disabled (set BROWSER_UPLOAD_SENSOR=1 to enable)", flush=True)
     print("[main] entering run loop", flush=True)
 
     threads: List[threading.Thread] = [
@@ -586,6 +598,16 @@ def main() -> None:
         threading.Thread(name="endpoint_sensor", target=sensor_thread_runner, args=("endpoint_sensor", endpoint_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
         threading.Thread(name="network_sensor", target=sensor_thread_runner, args=("network_sensor", net_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
     ]
+
+    if browser_upload_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="browser_upload_sensor",
+                target=sensor_thread_runner,
+                args=("browser_upload_sensor", browser_upload_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
 
     if print_sensor is not None:
         threads.append(

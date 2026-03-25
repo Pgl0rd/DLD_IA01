@@ -440,6 +440,35 @@ if True:
 
             self._observer = None
 
+            # Noise suppression (ported concept from Sensor/sensor_system/sensors/file_sensor.py)
+            # Goal: reduce duplicates / false positives from temp caches and fast re-writes.
+            self._suppress_modified_until: Dict[str, float] = {}
+            self._modified_suppress_window_seconds = 2.0
+            self._noise_path_tokens = (
+                "\\appdata\\local\\temp\\",
+                "\\appdata\\local\\google\\chrome\\user data\\",
+                "\\appdata\\roaming\\cursor\\",
+                "\\appdata\\roaming\\zalodata\\cache\\",
+                "\\cache\\",
+                "\\code cache\\",
+                "\\gpucache\\",
+                "\\network\\",
+                "\\logs\\",
+                "\\indexeddb\\",
+                "\\service worker\\",
+            )
+            self._noise_extensions = {
+                ".tmp",
+                ".temp",
+                ".log",
+                ".ldb",
+                ".sqlite",
+                ".journal",
+                ".wal",
+                ".idx",
+                ".pack",
+            }
+
         def add_watch_path(self, path: str) -> None:
             p = _norm_path(path)
             try:
@@ -452,8 +481,33 @@ if True:
             lp = (path or "").lower()
             if self.exclude_dirs and any(x in lp for x in self.exclude_dirs):
                 return True
+            if any(tok in lp for tok in self._noise_path_tokens):
+                return True
+            try:
+                if Path(lp).suffix in self._noise_extensions:
+                    return True
+            except Exception:
+                pass
             if self.include_exts is not None:
                 return _get_ext(path) not in self.include_exts
+            return False
+
+        def _mark_suppress_modified(self, path: Optional[str]) -> None:
+            if not path:
+                return
+            self._suppress_modified_until[str(path)] = time.monotonic() + self._modified_suppress_window_seconds
+
+        def _should_suppress_modified(self, path: Optional[str]) -> bool:
+            if not path:
+                return False
+            now = time.monotonic()
+            exp = self._suppress_modified_until.get(str(path))
+            if exp is None:
+                return False
+            if now <= exp:
+                return True
+            # expired
+            self._suppress_modified_until.pop(str(path), None)
             return False
 
         def _emit(self, evt: Dict[str, Any]) -> None:
@@ -880,6 +934,11 @@ if True:
                     if getattr(event, "is_directory", False):
                         return
                     ctx = self.outer._ctx_snapshot(ctx_provider)
+                    # Suppress noisy modified events shortly after create (debounce)
+                    try:
+                        self.outer._mark_suppress_modified(getattr(event, "src_path", None))
+                    except Exception:
+                        pass
                     try:
                         self.outer._emit(self.outer._build_event("created", event.src_path, None, ctx))
                     except RuntimeError:
@@ -887,6 +946,8 @@ if True:
 
                 def on_modified(self, event):
                     if getattr(event, "is_directory", False):
+                        return
+                    if self.outer._should_suppress_modified(getattr(event, "src_path", None)):
                         return
                     ctx = self.outer._ctx_snapshot(ctx_provider)
                     try:
