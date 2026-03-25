@@ -19,6 +19,7 @@ from agent.sensors.process_sensor import ProcessSensor
 from agent.sensors.network_sensor import NetworkSensor
 from agent.sensors.clipboard_sensor import ClipboardSensor
 from agent.sensors.context_correlator import ContextCorrelator
+from agent.sensors.endpoint_sensor import EndpointSensor
 from agent.queue_monitor import QueueMonitor
 from agent.sensors.context import ContextProvider
 
@@ -441,7 +442,28 @@ def main() -> None:
 
     watch_test_dir = RUNTIME_DIR / "watch_test"
     watch_test_dir.mkdir(parents=True, exist_ok=True)
-    watch_paths = [str(watch_test_dir)]
+
+    # Watch paths:
+    # - default: whole C: drive
+    # - optional env SENSOR_WATCH_PATHS (semicolon-separated) to override
+    watch_paths: List[str] = [r"C:\\"]
+
+    env_watch_paths = os.getenv("SENSOR_WATCH_PATHS", "").strip()
+    if env_watch_paths:
+        watch_paths = []
+        for p in env_watch_paths.split(";"):
+            p = p.strip()
+            if p:
+                watch_paths.append(p)
+
+    # de-duplicate while preserving order
+    _seen_paths = set()
+    _dedup_watch_paths: List[str] = []
+    for p in watch_paths:
+        if p not in _seen_paths:
+            _seen_paths.add(p)
+            _dedup_watch_paths.append(p)
+    watch_paths = _dedup_watch_paths
 
     start_ts = time.time()
     stop_event = threading.Event()
@@ -482,10 +504,23 @@ def main() -> None:
     )
 
     proc_watch = {
+        # Script engines / shells
         "powershell", "pwsh", "cmd", "wscript", "cscript", "python", "pythonw",
-        "curl", "wget", "rclone", "winscp", "filezilla", "pscp", "scp", "sftp", "robocopy",
+        # File transfer / upload tools  → native_download_tool, bitsadmin_download
+        "curl", "wget", "rclone", "winscp", "filezilla", "pscp", "scp", "sftp",
+        "bitsadmin", "certutil",
+        # Archiver tools → archive_staging
+        "7z", "7za", "winrar", "rar", "makecab",
+        # Bulk copy / exfil
+        "robocopy", "xcopy",
+        # LOLBins / living-off-the-land binaries
+        "mshta", "regsvr32", "rundll32", "msiexec", "cmstp", "installutil",
+        # Screen capture
         "snippingtool", "screenclippinghost", "obs64", "obs32", "camtasia", "greenshot", "lightshot",
+        # Clipboard helpers
         "autohotkey", "macrorecorder", "copyq", "ditto",
+        # Cloud CLI tools → cloud_exfiltration_tool
+        "aws", "gsutil", "az", "azcopy",
     }
 
     proc_sensor = ProcessSensor(
@@ -498,15 +533,31 @@ def main() -> None:
         include_username=True,
     )
 
+    endpoint_sensor = EndpointSensor(
+        queue_manager=qm,
+        watch_paths=watch_paths,
+        # Capture open/read across all processes in watched paths
+        # (filtering by process name misses Explorer/Office/editor workflows).
+        watch_processes=None,
+        poll_interval_sec=0.8,
+        read_refresh_sec=3.0,
+    )
+
+    enforce_upload_gate = os.getenv("NET_ENFORCE_UPLOAD_GATE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    prefer_sniff = os.getenv("NET_PREFER_SNIFF", "1").strip().lower() in {"1", "true", "yes", "on"}
+    gate_hold_sec = float(os.getenv("NET_GATE_HOLD_SEC", "1.2"))
+
     net_sensor = NetworkSensor(
         queue_manager=qm,
         only_upload_processes=False,
-        prefer_sniff=True,
+        prefer_sniff=prefer_sniff,
         debug=True,
         min_upload_bytes_browser=64 * 1024,
         min_upload_bytes_tool=64 * 1024,
         min_upload_bytes_default=128 * 1024,
         min_upload_bytes_quic=64 * 1024,
+        enforce_upload_gate=enforce_upload_gate,
+        gate_hold_sec=gate_hold_sec,
     )
 
     print_sensor = None
@@ -519,7 +570,8 @@ def main() -> None:
     print("[main] started pid=", os.getpid(), flush=True)
     print("[main] watch_paths:", watch_paths, flush=True)
     print("[main] print_sensor:", bool(print_sensor), flush=True)
-    print("[main] network_sensor: enabled", flush=True)
+    print(f"[main] network_sensor: enabled (prefer_sniff={prefer_sniff}, enforce_upload_gate={enforce_upload_gate}, gate_hold_sec={gate_hold_sec})", flush=True)
+    print("[main] endpoint_sensor: enabled (open/read/close + metadata/content in object)", flush=True)
     print("[main] entering run loop", flush=True)
 
     threads: List[threading.Thread] = [
@@ -531,6 +583,7 @@ def main() -> None:
         threading.Thread(name="usb_sensor", target=sensor_thread_runner, args=("usb_sensor", usb_sensor.run_loop, qm, stop_event, stop_event, on_usb_connected, None, ctx), daemon=True),
         threading.Thread(name="clipboard_sensor", target=sensor_thread_runner, args=("clipboard_sensor", clip_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
         threading.Thread(name="process_sensor", target=sensor_thread_runner, args=("process_sensor", proc_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
+        threading.Thread(name="endpoint_sensor", target=sensor_thread_runner, args=("endpoint_sensor", endpoint_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
         threading.Thread(name="network_sensor", target=sensor_thread_runner, args=("network_sensor", net_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
     ]
 

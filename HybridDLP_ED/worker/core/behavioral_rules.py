@@ -935,20 +935,33 @@ class BulkFileCopyRule(BehavioralRule):
     
     def check(self, event: Dict[str, Any], fast_scan_result: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """Check bulk file copy"""
+        raw_original = event.get('raw_original', {}) or {}
+        raw_metrics = raw_original.get('metrics', {}) or {}
+        raw_obj = raw_original.get('object', {}) or {}
+
         metrics = event.get('metrics', {}) or {}
-        file_count = metrics.get('file_count') or event.get('File_Count') or 0
-        
+        file_count = (
+            metrics.get('file_count')
+            or raw_metrics.get('file_count')
+            or event.get('File_Count')
+            or 0
+        )
+
         if file_count >= self.file_count_threshold:
-            # Check destination
             obj = event.get('object', {}) or {}
-            dest_volume_type = obj.get('volume_type') or event.get('Dest_Volume_Type', '')
-            
-            # Nếu copy ra USB hoặc network
-            is_external = (
-                'removable' in str(dest_volume_type).lower() or
-                'network' in str(dest_volume_type).lower()
+            dest_volume_type = (
+                obj.get('dest_volume_type')
+                or obj.get('volume_type')
+                or raw_obj.get('dest_volume_type')
+                or raw_obj.get('volume_type')
+                or event.get('Dest_Volume_Type', '')
             )
-            
+
+            is_external = (
+                'removable' in str(dest_volume_type).lower()
+                or 'network' in str(dest_volume_type).lower()
+            )
+
             if is_external:
                 return True, {
                     'rule_name': self.name,
@@ -957,7 +970,7 @@ class BulkFileCopyRule(BehavioralRule):
                     'dest_volume_type': dest_volume_type,
                     'reason': f"Copy {file_count} files ra thiết bị ngoài"
                 }
-        
+
         return False, {}
 
 
@@ -976,27 +989,46 @@ class EncryptedArchiveRule(BehavioralRule):
     
     def check(self, event: Dict[str, Any], fast_scan_result: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """Check encrypted archive"""
+        raw_original = event.get('raw_original', {}) or {}
+        raw_flags = raw_original.get('flags', {}) or {}
+        raw_obj = raw_original.get('object', {}) or {}
+
         flags = event.get('flags', {}) or {}
-        password_protected = flags.get('password_protected') or event.get('Password_Flag')
-        
+        password_protected = (
+            flags.get('password_protected')
+            or raw_flags.get('password_protected')
+            or event.get('Password_Flag')
+        )
+
         if password_protected:
-            # Check nếu copy ra USB hoặc external
             obj = event.get('object', {}) or {}
-            dest_volume_type = obj.get('volume_type') or event.get('Dest_Volume_Type', '')
-            
-            is_external = (
-                'removable' in str(dest_volume_type).lower() or
-                'network' in str(dest_volume_type).lower()
+            dest_volume_type = (
+                obj.get('dest_volume_type')
+                or obj.get('volume_type')
+                or raw_obj.get('dest_volume_type')
+                or raw_obj.get('volume_type')
+                or event.get('Dest_Volume_Type', '')
             )
-            
+            dest_path = (
+                obj.get('dst_path') or raw_obj.get('dst_path')
+                or event.get('dst_path') or event.get('Dest_Path') or ''
+            ).lower()
+
+            is_external = (
+                'removable' in str(dest_volume_type).lower()
+                or 'network' in str(dest_volume_type).lower()
+                or any(d in dest_path for d in ['e:', 'f:', 'g:', 'h:', 'i:', 'j:'])
+            )
+
             if is_external:
                 return True, {
                     'rule_name': self.name,
                     'severity': self.severity,
                     'dest_volume_type': dest_volume_type,
+                    'dest_path': dest_path,
                     'reason': "Tạo file nén có mật khẩu và copy ra thiết bị ngoài"
                 }
-        
+
         return False, {}
 
 
@@ -1098,25 +1130,52 @@ class HighFrequencyClipboardRule(BehavioralRule):
         clipboard = event.get('clipboard', {}) or {}
         raw_original = event.get('raw_original', {}) or {}
         raw_clipboard = raw_original.get('clipboard', {}) or {}
-        
+
         copy_frequency = clipboard.get('copy_frequency') or raw_clipboard.get('copy_frequency', '')
         paste_frequency = clipboard.get('paste_frequency') or raw_clipboard.get('paste_frequency', '')
-        
-        # Parse frequency (ví dụ: "20.00/min")
+
+        # Numeric values (per_minute float) — preferred over string parsing
+        copy_frequency_value = (
+            clipboard.get('copy_frequency_value')
+            or raw_clipboard.get('copy_frequency_value')
+        )
+        paste_frequency_value = (
+            clipboard.get('paste_frequency_value')
+            or raw_clipboard.get('paste_frequency_value')
+        )
+
+        # 1. Check numeric values first (fast path)
+        if isinstance(copy_frequency_value, (int, float)) and copy_frequency_value > 10:
+            return True, {
+                'rule_name': self.name,
+                'severity': self.severity,
+                'copy_frequency': copy_frequency,
+                'copy_frequency_value': copy_frequency_value,
+                'reason': f"Copy tần suất cao: {copy_frequency_value:.1f}/min"
+            }
+        if isinstance(paste_frequency_value, (int, float)) and paste_frequency_value > 10:
+            return True, {
+                'rule_name': self.name,
+                'severity': self.severity,
+                'paste_frequency': paste_frequency,
+                'paste_frequency_value': paste_frequency_value,
+                'reason': f"Paste tần suất cao: {paste_frequency_value:.1f}/min"
+            }
+
+        # 2. Fallback: parse string format e.g. "20.00/min" or "12/30s"
         try:
             if copy_frequency:
                 copy_rate = float(re.search(r'[\d.]+', str(copy_frequency)).group())
-                if copy_rate > 10:  # > 10 copies per minute
+                if copy_rate > 10:
                     return True, {
                         'rule_name': self.name,
                         'severity': self.severity,
                         'copy_frequency': copy_frequency,
                         'reason': f"Copy tần suất cao: {copy_frequency}"
                     }
-            
             if paste_frequency:
                 paste_rate = float(re.search(r'[\d.]+', str(paste_frequency)).group())
-                if paste_rate > 10:  # > 10 pastes per minute
+                if paste_rate > 10:
                     return True, {
                         'rule_name': self.name,
                         'severity': self.severity,
@@ -1125,7 +1184,7 @@ class HighFrequencyClipboardRule(BehavioralRule):
                     }
         except Exception:
             pass
-        
+
         return False, {}
 
 
@@ -1198,19 +1257,19 @@ class CloudSyncRule(BehavioralRule):
             if event.get('Event_Type') not in ['Move', 'Rename', 'Copy']:
                 return False, {}
         
-        # Read from both event and raw_original (per Noteupdate.txt: object.dst_path chứa "onedrive/dropbox")
         obj = event.get('object', {}) or {}
         raw_obj = raw_original.get('object', {}) or {}
-        
+
         dest_path = (
-            obj.get('dst_path') or
-            raw_obj.get('dst_path') or
-            event.get('dst_path') or
-            ''
+            obj.get('dst_path')
+            or raw_obj.get('dst_path')
+            or event.get('dst_path')
+            or event.get('Dest_Path')
+            or ''
         ).lower()
-        
-        # Per Noteupdate.txt: object.dst_path chứa "OneDrive", "Google Drive", "Dropbox"
-        if 'onedrive' in dest_path or 'dropbox' in dest_path or 'google drive' in dest_path or 'iclouddrive' in dest_path or 'box' in dest_path:
+
+        _CLOUD_HINTS = ['onedrive', 'dropbox', 'google drive', 'googledrive', 'iclouddrive', '\\box\\', '/box/']
+        if any(h in dest_path for h in _CLOUD_HINTS):
             # Check yara or sensitivity
             yara_matches = fast_scan_result.get('yara_matches', [])
             sensitivity = (
@@ -1248,53 +1307,67 @@ class ProcessAnomalyRule(BehavioralRule):
         )
 
     def check(self, event: Dict[str, Any], fast_scan_result: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
-        """Check process anomaly (per Noteupdate.txt Kịch bản 4)"""
+        """Check process anomaly (per Noteupdate.txt Rule 10)"""
         event_type = event.get('type', '').lower()
         if event_type not in ['proc_start', 'process_created']:
             return False, {}
-        
-        # Read from both event and raw_original (per Noteupdate.txt: ioc_hits gồm native_download_tool/bitsadmin_download/cloud_exfiltration_tool/encoded_command)
+
         raw_original = event.get('raw_original', {}) or {}
         ioc_hits = event.get('ioc_hits') or raw_original.get('ioc_hits') or []
-        
-        if not ioc_hits:
+
+        # High-risk tags expected in ioc_hits (from cmdline IOC patterns)
+        high_risk_ioc_tags = {
+            'archive_staging', 'native_download_tool', 'bitsadmin_download',
+            'cloud_exfiltration_tool', 'encoded_command', 'certutil_abuse',
+            'email_exfiltration', 'credential_keyword',
+        }
+
+        # High-risk tags that appear in the top-level tags[] list
+        # (set by _tags_for_name_and_path in process_sensor)
+        high_risk_process_tags = {
+            'file_transfer_tool', 'archive_tool', 'screen_capture_tool',
+        }
+
+        matched_ioc = [
+            ioc.get('tag', '') for ioc in ioc_hits
+            if any(t in str(ioc.get('tag', '')).lower() for t in high_risk_ioc_tags)
+        ]
+
+        tags_list = event.get('tags') or raw_original.get('tags') or []
+        matched_proc_tags = [
+            t for t in tags_list
+            if any(hr in str(t).lower() for hr in high_risk_process_tags)
+        ]
+
+        all_matched = list(dict.fromkeys(matched_ioc + matched_proc_tags))
+
+        if not all_matched:
             return False, {}
-        
-        # Per Noteupdate.txt: ioc_hits gồm native_download_tool, bitsadmin_download, cloud_exfiltration_tool, encoded_command
-        high_risk_tags = ['archive_staging', 'native_download_tool', 'bitsadmin_download', 'cloud_exfiltration_tool', 'encoded_command']
-        
-        matched_tags = []
-        for ioc in ioc_hits:
-            tag = ioc.get('tag', '').lower()
-            if any(t in tag for t in high_risk_tags):
-                matched_tags.append(tag)
-        
-        if matched_tags:
-            # Per Noteupdate.txt: actor.process = "powershell.exe", actor.cmdline
-            actor = event.get('actor', {}) or {}
-            raw_actor = raw_original.get('actor', {}) or {}
-            proc_name = (
-                actor.get('process') or
-                raw_actor.get('process') or
-                event.get('process', {}).get('name') or
-                ''
-            )
-            cmdline = (
-                actor.get('cmdline') or
-                raw_actor.get('cmdline') or
-                event.get('process', {}).get('cmdline') or
-                ''
-            )
-            
-            return True, {
-                'rule_name': self.name,
-                'severity': self.severity,
-                'matched_tags': matched_tags,
-                'process': proc_name,
-                'cmdline': cmdline,
-                'reason': f"Process bất thường ({proc_name}): {', '.join(matched_tags)}"
-            }
-        return False, {}
+
+        actor = event.get('actor', {}) or {}
+        raw_actor = raw_original.get('actor', {}) or {}
+        proc = event.get('process', {}) or {}
+        proc_name = (
+            actor.get('process')
+            or raw_actor.get('process')
+            or proc.get('name')
+            or ''
+        )
+        cmdline = (
+            actor.get('cmdline')
+            or raw_actor.get('cmdline')
+            or proc.get('cmdline')
+            or ''
+        )
+
+        return True, {
+            'rule_name': self.name,
+            'severity': self.severity,
+            'matched_tags': all_matched,
+            'process': proc_name,
+            'cmdline': cmdline,
+            'reason': f"Process bất thường ({proc_name}): {', '.join(all_matched)}"
+        }
 
 class PrintJobRule(BehavioralRule):
     """

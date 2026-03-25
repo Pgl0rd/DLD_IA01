@@ -1,0 +1,397 @@
+Bộ behavioral rule chuẩn hóa
+Chuẩn event chung nên có cho mọi sensor
+Tất cả sensor nên cố gắng emit chung các field nền sau để rule dễ chạy:
+{
+ "ts": "...",
+ "type": "...",
+ "source": "...",
+ "severity": "...",
+ "operation": {
+   "op_type": "...",
+   "tool": "..."
+ },
+ "context": {
+   "window_title": "...",
+   "fg_app": "...",
+   "fg_process": "..."
+ },
+ "actor": {
+   "user": "...",
+   "process": "...",
+   "cmdline": "..."
+ },
+ "object": {
+   "path": "...",
+   "dst_path": "...",
+   "drive": "...",
+   "volume_type": "...",
+   "sensitivity": "..."
+ },
+ "metrics": {
+   "file_count": null,
+   "entropy": null,
+   "bytes_out": null
+ },
+ "flags": {
+   "password_protected": null
+ },
+ "ioc_hits": [],
+ "tags": []
+}
+Lý do là rule hiện tại thường fallback qua nhiều schema khác nhau như object.*, top-level field cũ (File_Sensitivity, Dest_Path, Old_Extension...), và raw_original.*. Nếu chuẩn hóa từ sensor ngay từ đầu thì code rule sẽ sạch hơn nhiều.
+behavioral_rules
+
+Rule 1 — Clipboard Paste To External App
+Mục tiêu: phát hiện copy dữ liệu nhạy cảm rồi paste sang browser/web/chat/mail/cloud app bên ngoài. Rule này đang là hybrid rule: kiểm tra sink bên ngoài + nội dung nhạy cảm + ngữ cảnh clipboard.
+behavioral_rules
+Điều kiện trigger
+operation.op_type là clipboard_paste hoặc có chữ paste
+clipboard.content_type == "Text"
+clipboard.snapshot_linked != False
+nếu snapshot_linked bị thiếu thì vẫn cho qua nếu có bằng chứng nhạy cảm mạnh như ioc_hits, yara_matches, hoặc sensitivity
+nội dung phải được coi là sensitive theo một trong các dấu hiệu:
+object.sensitivity hoặc File_Sensitivity là Sensitive/Highly Sensitive
+có ioc_hits
+có fast_scan_result.yara_matches
+entropy >= 4.3
+text_len >= 500
+sink phải là external sink:
+app là browser nằm trong tập browser hỗ trợ
+hoặc app chat/messaging nằm trong danh sách nhạy cảm
+hoặc domain/title khớp các dịch vụ như ChatGPT, Gmail, Drive, Slack, Discord, Zalo, Dropbox, OneDrive...
+ behavioral_rules
+Field bắt buộc
+type
+operation.op_type
+clipboard.content_type
+clipboard.content_len
+clipboard.dest_app
+clipboard.active_window_title hoặc clipboard.dest_window_title
+clipboard.dest_domain
+clipboard.snapshot_linked
+metrics.entropy
+ioc_hits
+object.sensitivity hoặc File_Sensitivity
+content.sample hoặc clipboard.text_file để chứng minh có text content
+ behavioral_rules
+Output mong muốn
+{
+ "rule_name": "Clipboard_Paste_To_External_App",
+ "severity": "high",
+ "reason": "...",
+ "dest_app": "...",
+ "dest_domain": "...",
+ "window_title": "...",
+ "text_len": 1234,
+ "entropy": 4.8
+}
+Sensor cần phục vụ
+clipboard_sensor
+context provider
+
+Rule 2 — USB Data Exfiltration
+Mục tiêu: phát hiện copy dữ liệu nhạy cảm ra USB/removable drive. Rule này dựa vào đích là removable volume và file có sensitivity hoặc YARA match.
+behavioral_rules
+Điều kiện trigger
+đích là removable:
+object.volume_type chứa removable
+hoặc Dest_Volume_Type chứa removable
+hoặc dst_path / drive nằm ở E: trở đi
+file là nhạy cảm:
+có fast_scan_result.yara_matches
+hoặc object.sensitivity / File_Sensitivity có sensitive / confidential
+ behavioral_rules
+Field bắt buộc
+object.dst_path hoặc dst_path / Dest_Path
+object.volume_type hoặc Dest_Volume_Type
+object.drive
+object.sensitivity hoặc File_Sensitivity
+fast_scan_result.yara_matches
+Output mong muốn
+{
+ "rule_name": "USB_Data_Exfiltration",
+ "severity": "high",
+ "dest_path": "E:\\backup\\secret.xlsx",
+ "dest_volume_type": "Removable",
+ "file_sensitivity": "Highly Sensitive"
+}
+Sensor cần phục vụ
+file_sensor
+usb_sensor hỗ trợ context, nhưng rule match chính từ file event
+
+Rule 3 — Network Upload
+Mục tiêu: phát hiện upload dữ liệu ra ngoài qua browser, app desktop, CLI tool, HTTP upload, hoặc network exfiltration. Đây là rule phức tạp nhất hiện tại.
+behavioral_rules
+Điều kiện trigger
+Phải thỏa 3 cụm điều kiện:
+3.1 Upload operation
+Một trong các dấu hiệu sau:
+type thuộc tập:
+network_flow
+network_flow_summary
+http_request
+http_upload
+file_upload
+browser_upload
+network_upload
+cloud_exfiltration
+data_exfiltration
+corr_suspected_upload
+hoặc operation.op_type chứa:
+upload, post, put, send, exfil
+hoặc method là POST, PUT, PATCH
+hoặc content_type là multipart/form-data
+hoặc bytes_out >= 100KB
+ behavioral_rules
+3.2 External destination
+Một trong các dấu hiệu sau:
+app là browser
+app là desktop upload app như Slack, Discord, Outlook, OneDrive, Dropbox
+app là CLI upload tool như curl, powershell, certutil, scp, winscp, filezilla
+có dest_domain, dest_url, dst_ip
+domain/url/title match tập domain nhạy cảm như chatgpt.com, gmail.com, drive.google.com, dropbox.com, slack.com, pastebin.com...
+ behavioral_rules
+3.3 Sensitive file/content
+Một trong các dấu hiệu sau:
+object.sensitivity / File_Sensitivity là sensitive/highly sensitive/confidential
+có yara_matches
+có ioc_hits
+extension thuộc tập nhạy cảm .xlsx .csv .docx .pdf .sql .zip .7z .env ...
+có debug.evidence.recent_staging
+hoặc source event type là corr_suspected_upload, cloud_exfiltration, http_upload, data_exfiltration
+ behavioral_rules
+Field bắt buộc
+type
+operation.op_type
+operation.tool
+network.dest_domain
+network.dest_ip
+network.bytes_out_total hoặc network.bytes_sent_total
+network.method
+network.content_type
+actor.process
+context.window_title
+object.path hoặc file_path
+object.sensitivity hoặc File_Sensitivity
+ioc_hits
+debug.evidence.recent_staging nếu có correlator
+Output mong muốn
+{
+ "rule_name": "Network_Upload",
+ "severity": "high",
+ "dest_domain": "drive.google.com",
+ "dest_app": "chrome.exe",
+ "bytes_out": 420331,
+ "file_path": "C:\\finance\\payroll.xlsx",
+ "sensitivity": "Highly Sensitive"
+}
+Sensor cần phục vụ
+network_sensor
+context_correlator
+file_sensor
+process_sensor hỗ trợ actor/process
+
+Rule 4 — Bulk File Copy
+Mục tiêu: phát hiện copy hàng loạt file ra external destination. Rule hiện dùng ngưỡng file_count >= 50.
+behavioral_rules
+Điều kiện trigger
+metrics.file_count >= 50 hoặc File_Count >= 50
+đích là external:
+object.volume_type hoặc Dest_Volume_Type chứa removable hoặc network
+ behavioral_rules
+Field bắt buộc
+metrics.file_count hoặc File_Count
+object.volume_type hoặc Dest_Volume_Type
+Output mong muốn
+{
+ "rule_name": "Bulk_File_Copy",
+ "severity": "medium",
+ "file_count": 120,
+ "dest_volume_type": "Network"
+}
+Sensor cần phục vụ
+file_sensor
+
+Rule 5 — Encrypted Archive
+Mục tiêu: phát hiện tạo file nén có mật khẩu rồi đưa ra thiết bị ngoài. Rule match nếu password_protected và đích là removable/network.
+behavioral_rules
+Điều kiện trigger
+flags.password_protected == True hoặc Password_Flag == True
+object.volume_type hoặc Dest_Volume_Type là removable/network
+ behavioral_rules
+Field bắt buộc
+flags.password_protected hoặc Password_Flag
+object.volume_type hoặc Dest_Volume_Type
+nên có thêm object.path để debug
+Output mong muốn
+{
+ "rule_name": "Encrypted_Archive",
+ "severity": "high",
+ "dest_volume_type": "Removable"
+}
+Sensor cần phục vụ
+file_sensor
+
+Rule 6 — Extension Change
+Mục tiêu: phát hiện rename đổi extension có thể để né detection. Rule này đặc biệt quan tâm đổi từ extension nhạy cảm sang extension đáng ngờ.
+behavioral_rules
+Điều kiện trigger
+operation là rename/move:
+operation.op_type chứa rename hoặc move
+hoặc Event_Type là Rename / Move
+có old_ext và new_ext
+trigger mạnh nếu:
+old_ext thuộc .xlsx .xls .docx .doc .pdf .csv
+new_ext thuộc .txt .encrypted .bak .tmp .old
+hoặc chỉ cần đổi từ extension sensitive sang bất kỳ extension khác
+ behavioral_rules
+Field bắt buộc
+operation.op_type hoặc Event_Type
+object.old_ext hoặc Old_Extension
+object.new_ext hoặc New_Extension
+Output mong muốn
+{
+ "rule_name": "Extension_Change",
+ "severity": "medium",
+ "old_ext": ".xlsx",
+ "new_ext": ".txt"
+}
+Sensor cần phục vụ
+file_sensor
+
+Rule 7 — High Frequency Clipboard
+Mục tiêu: phát hiện copy/paste tần suất cao. Rule hiện parse số từ copy_frequency hoặc paste_frequency và so với ngưỡng > 10.
+behavioral_rules
+Điều kiện trigger
+clipboard.copy_frequency > 10
+hoặc clipboard.paste_frequency > 10
+ behavioral_rules
+Field bắt buộc
+clipboard.copy_frequency
+clipboard.paste_frequency
+Output mong muốn
+{
+ "rule_name": "High_Frequency_Clipboard",
+ "severity": "medium",
+ "copy_frequency": "12/30s"
+}
+Sensor cần phục vụ
+clipboard_sensor
+
+Rule 8 — Bulk Paste
+Mục tiêu: phát hiện paste khối lượng dữ liệu lớn. Rule chỉ alert mạnh nếu vừa bulk vừa có YARA match.
+behavioral_rules
+Điều kiện trigger
+clipboard.bulk_paste_event == True
+hoặc clipboard.content_len > 10000
+và fast_scan_result.yara_matches không rỗng
+ behavioral_rules
+Field bắt buộc
+clipboard.bulk_paste_event
+clipboard.content_len
+fast_scan_result.yara_matches
+Output mong muốn
+{
+ "rule_name": "Bulk_Paste",
+ "severity": "high",
+ "content_len": 15500
+}
+Sensor cần phục vụ
+clipboard_sensor
+
+Rule 9 — Cloud Sync
+Mục tiêu: phát hiện copy/move file vào thư mục sync cloud như OneDrive, Dropbox, Google Drive, iCloudDrive, Box. Nếu file nhạy cảm thì severity tăng lên high.
+behavioral_rules
+Điều kiện trigger
+operation.op_type chứa move, rename, copy
+hoặc Event_Type là Move, Rename, Copy
+dst_path chứa:
+onedrive
+dropbox
+google drive
+iclouddrive
+box
+nếu có yara_matches hoặc sensitivity nhạy cảm thì severity = high, còn không thì medium
+ behavioral_rules
+Field bắt buộc
+operation.op_type hoặc Event_Type
+object.dst_path hoặc dst_path
+object.sensitivity hoặc File_Sensitivity
+fast_scan_result.yara_matches
+Output mong muốn
+{
+ "rule_name": "Cloud_Sync",
+ "severity": "high",
+ "dest_path": "C:\\Users\\A\\OneDrive\\secret.pdf"
+}
+Sensor cần phục vụ
+file_sensor
+
+Rule 10 — Process Anomaly
+Mục tiêu: phát hiện process bất thường qua IOC tag trong lúc process start. Rule này quan tâm các tag như archive_staging, native_download_tool, bitsadmin_download, cloud_exfiltration_tool, encoded_command.
+behavioral_rules
+Điều kiện trigger
+type là proc_start hoặc process_created
+có ioc_hits
+trong ioc_hits[].tag có một trong các tag high risk:
+archive_staging
+native_download_tool
+bitsadmin_download
+cloud_exfiltration_tool
+encoded_command
+ behavioral_rules
+Field bắt buộc
+type
+ioc_hits
+actor.process hoặc process.name
+actor.cmdline hoặc process.cmdline
+Output mong muốn
+{
+ "rule_name": "Process_Anomaly",
+ "severity": "high",
+ "process": "powershell.exe",
+ "cmdline": "powershell -enc ...",
+ "matched_tags": ["encoded_command"]
+}
+Sensor cần phục vụ
+process_sensor
+
+Rule 11 — Print Job
+Mục tiêu: phát hiện in tài liệu, đặc biệt là in ra máy in ảo/PDF. Rule hiện match mọi print_job, nhưng severity lên high nếu printer là virtual/pdf.
+behavioral_rules
+Điều kiện trigger
+type == "print_job"
+nếu print.printer_type == "virtual" hoặc có chữ pdf thì severity = high, còn không thì medium
+ behavioral_rules
+Field bắt buộc
+type
+print.printer_type
+nên có thêm print.printer_name, print.document_name, Printed_File_Path
+Output mong muốn
+{
+ "rule_name": "Print_Job",
+ "severity": "high",
+ "printer_type": "virtual"
+}
+Sensor cần phục vụ
+print_sensor
+
+Rule 12 — Correlated Event
+Mục tiêu: nhận cảnh báo tổng hợp từ L1/L2 correlator. Rule này rất đơn giản: cứ event có type bắt đầu bằng corr_ hoặc tag bắt đầu bằng corr_ là match.
+behavioral_rules
+Điều kiện trigger
+type.startswith("corr_")
+hoặc tags[] có phần tử bắt đầu bằng corr_
+ behavioral_rules
+Field bắt buộc
+type
+hoặc tags
+Output mong muốn
+{
+ "rule_name": "Correlated_Event",
+ "severity": "high",
+ "event_type": "corr_network_exfil_suspected"
+}
+Sensor cần phục vụ
+context_correlator
+

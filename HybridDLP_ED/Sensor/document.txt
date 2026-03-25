@@ -1,0 +1,541 @@
+Dưới đây là **document chuẩn hóa Layer 1 – Sensor Layer** được viết theo hướng **AI-ready (promptable spec)**: đầy đủ contract, field mapping, behavior, edge case, performance, và acceptance criteria. Bạn có thể đưa nguyên khối này cho AI để build mà không bị thiếu thông tin.
+
+---
+
+# 📘 DLP SYSTEM – LAYER 1 SENSOR SPECIFICATION (AI-BUILD READY)
+
+---
+
+# 1. OBJECTIVE
+
+Layer 1 (Sensor Layer) chịu trách nhiệm:
+
+* Thu thập event từ OS / user activity
+* Chuẩn hóa **ngay tại source** về **Unified Event Schema**
+* Emit event **real-time** sang Layer 2 (Normalizer/Queue)
+
+### Non-goal:
+
+* Không xử lý detection logic
+* Không scoring
+* Không correlation
+
+---
+
+# 2. GLOBAL EVENT CONTRACT (MANDATORY OUTPUT)
+
+## 2.1 Unified Event Schema
+
+Mọi sensor **PHẢI emit đúng schema này** (không được lệch)
+
+```json
+{
+  "ts": "ISO8601 timestamp",
+  "type": "string",
+
+  "source": "sensor_name",
+  "severity": "low | medium | high | critical",
+
+  "operation": {
+    "op_type": "string",
+    "tool": "string | null"
+  },
+
+  "context": {
+    "window_title": "string | null",
+    "fg_app": "string | null",
+    "fg_process": "string | null"
+  },
+
+  "actor": {
+    "user": "string",
+    "process": "string",
+    "cmdline": "string | null"
+  },
+
+  "object": {
+    "path": "string | null",
+    "dst_path": "string | null",
+    "drive": "string | null",
+    "volume_type": "fixed | removable | network | cloud | unknown",
+    "sensitivity": "public | internal | sensitive | highly_sensitive | unknown"
+  },
+
+  "metrics": {
+    "file_count": "number | null",
+    "entropy": "number | null",
+    "bytes_out": "number | null"
+  },
+
+  "flags": {
+    "password_protected": "boolean | null"
+  },
+
+  "ioc_hits": [],
+  "tags": []
+}
+```
+
+---
+
+## 2.2 HARD RULES
+
+* ❗ Không được emit field ngoài schema
+* ❗ Không được rename field
+* ❗ Nếu thiếu dữ liệu → set `null`
+* ❗ Timestamp phải là UTC ISO8601
+* ❗ All string normalized lowercase (trừ path)
+
+---
+
+# 3. SENSOR TYPES (REQUIRED IMPLEMENTATION)
+
+## 3.1 FILE SENSOR
+
+### 3.1.1 Scope
+
+Capture:
+
+* create
+* copy
+* move
+* delete
+* rename
+
+### 3.1.2 Required OS Hooks
+
+* Windows:
+
+  * USN Journal / FileSystemWatcher / ETW
+* Linux:
+
+  * inotify
+* Mac:
+
+  * FSEvents
+
+---
+
+### 3.1.3 Event Mapping
+
+| OS Event | op_type     |
+| -------- | ----------- |
+| create   | file_create |
+| copy     | file_copy   |
+| move     | file_move   |
+| rename   | file_rename |
+| delete   | file_delete |
+
+---
+
+### 3.1.4 Mapping Rules
+
+```json
+"operation": {
+  "op_type": "file_copy"
+}
+```
+
+```json
+"object": {
+  "path": "source file",
+  "dst_path": "destination file",
+  "drive": "E:",
+  "volume_type": "removable"
+}
+```
+
+---
+
+### 3.1.5 Volume Classification
+
+| Condition     | volume_type |
+| ------------- | ----------- |
+| C:, D:        | fixed       |
+| USB           | removable   |
+| \network      | network     |
+| OneDrive path | cloud       |
+
+---
+
+### 3.1.6 Edge Cases
+
+* rename without extension → set old_ext null
+* temp file → still emit
+* batch copy → aggregate → metrics.file_count
+
+---
+
+---
+
+## 3.2 CLIPBOARD SENSOR
+
+### 3.2.1 Scope
+
+Capture:
+
+* copy
+* paste
+
+---
+
+### 3.2.2 Required Data
+
+```json
+"operation": {
+  "op_type": "clipboard_paste"
+}
+```
+
+```json
+"metrics": {
+  "bytes_out": null
+}
+```
+
+---
+
+### 3.2.3 Clipboard Extension Fields (MANDATORY)
+
+```json
+"clipboard": {
+  "content_type": "text | file | image",
+  "content_len": number,
+  "snapshot_linked": boolean,
+  "dest_app": "string",
+  "dest_domain": "string | null",
+  "dest_window_title": "string",
+  "copy_frequency": number,
+  "paste_frequency": number,
+  "bulk_paste_event": boolean
+}
+```
+
+---
+
+### 3.2.4 Detection Requirements
+
+* Detect active window
+* Extract domain from browser
+* Track frequency in rolling window (30s)
+
+---
+
+---
+
+## 3.3 PROCESS SENSOR
+
+### 3.3.1 Scope
+
+Capture:
+
+* process start
+* process end
+
+---
+
+### 3.3.2 Mapping
+
+```json
+"type": "process_created"
+```
+
+```json
+"actor": {
+  "process": "powershell.exe",
+  "cmdline": "powershell -enc ..."
+}
+```
+
+---
+
+### 3.3.3 IOC Extraction
+
+* base64 command
+* suspicious flags
+* known tool signatures
+
+---
+
+---
+
+## 3.4 NETWORK SENSOR
+
+### 3.4.1 Scope
+
+Capture:
+
+* HTTP requests
+* upload traffic
+* outbound traffic
+
+---
+
+### 3.4.2 Required Fields
+
+```json
+"operation": {
+  "op_type": "upload"
+}
+```
+
+```json
+"network": {
+  "dest_domain": "...",
+  "dest_ip": "...",
+  "method": "POST",
+  "content_type": "...",
+  "bytes_sent_total": number
+}
+```
+
+---
+
+### 3.4.3 Detection Conditions
+
+Mark upload if:
+
+* POST / PUT
+* multipart/form-data
+* bytes_out > 100KB
+
+---
+
+---
+
+## 3.5 USB SENSOR
+
+### 3.5.1 Scope
+
+Capture:
+
+* device mount
+* device remove
+
+---
+
+### 3.5.2 Mapping
+
+```json
+"type": "usb_mount"
+```
+
+```json
+"object": {
+  "volume_type": "removable"
+}
+```
+
+---
+
+---
+
+## 3.6 PRINT SENSOR
+
+### 3.6.1 Scope
+
+Capture:
+
+* print job
+
+---
+
+### 3.6.2 Required Fields
+
+```json
+"type": "print_job"
+```
+
+```json
+"print": {
+  "printer_name": "...",
+  "printer_type": "physical | virtual",
+  "document_name": "...",
+  "file_path": "..."
+}
+```
+
+---
+
+---
+
+# 4. CONTEXT PROVIDER (SHARED MODULE)
+
+## MUST IMPLEMENT
+
+Provide:
+
+* active window title
+* foreground app
+* foreground process
+
+---
+
+# 5. PERFORMANCE REQUIREMENTS
+
+| Metric      | Target  |
+| ----------- | ------- |
+| Latency     | < 50ms  |
+| Memory idle | < 100MB |
+| CPU idle    | < 1%    |
+| CPU active  | < 30%   |
+
+---
+
+# 6. RELIABILITY
+
+* Must support offline buffering
+* Retry queue (at least 3 times)
+* No event loss
+
+---
+
+# 7. SECURITY
+
+* No raw sensitive data stored locally
+* Encrypt temp cache
+* Mask clipboard if needed
+
+---
+
+# 8. OUTPUT TRANSPORT
+
+## MUST SUPPORT
+
+* IPC queue OR Redis OR local queue
+
+---
+
+# 9. ACCEPTANCE TEST CASES
+
+### Case 1 — Copy file to USB
+
+→ MUST emit:
+
+* op_type = file_copy
+* volume_type = removable
+
+---
+
+### Case 2 — Paste to browser
+
+→ MUST include:
+
+* clipboard.dest_domain
+* content_len
+
+---
+
+### Case 3 — Upload file
+
+→ MUST include:
+
+* bytes_out
+* dest_domain
+
+---
+
+### Case 4 — Process start (powershell -enc)
+
+→ MUST include:
+
+* cmdline
+* ioc_hits
+
+---
+
+# 10. NON-FUNCTIONAL REQUIREMENTS
+
+* Modular sensor design
+* Config-driven
+* Easy to extend
+
+---
+
+# 11. OUTPUT EXAMPLE (FULL)
+
+```json
+{
+  "ts": "2026-03-24T10:00:00Z",
+  "type": "file_copy",
+  "source": "file_sensor",
+  "severity": "medium",
+
+  "operation": {
+    "op_type": "file_copy",
+    "tool": "explorer.exe"
+  },
+
+  "context": {
+    "window_title": "File Explorer",
+    "fg_app": "explorer",
+    "fg_process": "explorer.exe"
+  },
+
+  "actor": {
+    "user": "john",
+    "process": "explorer.exe",
+    "cmdline": null
+  },
+
+  "object": {
+    "path": "C:\\secret.xlsx",
+    "dst_path": "E:\\backup\\secret.xlsx",
+    "drive": "E:",
+    "volume_type": "removable",
+    "sensitivity": "unknown"
+  },
+
+  "metrics": {
+    "file_count": 1,
+    "entropy": null,
+    "bytes_out": null
+  },
+
+  "flags": {
+    "password_protected": null
+  },
+
+  "ioc_hits": [],
+  "tags": []
+}
+```
+
+---
+
+# 12. FINAL INSTRUCTION FOR AI (COPY THIS)
+
+**Build a cross-platform sensor system that:**
+
+1. Implements:
+
+   * file_sensor
+   * clipboard_sensor
+   * process_sensor
+   * network_sensor
+   * usb_sensor
+   * print_sensor
+
+2. Ensures:
+
+   * All events follow EXACT unified schema
+   * No missing mandatory fields
+   * All mapping rules strictly followed
+
+3. Must:
+
+   * Normalize data at source
+   * Emit real-time events
+   * Support high performance and low resource usage
+
+---
+
+# 🔥 KẾT LUẬN
+
+Nếu bạn build đúng spec này:
+
+👉 Layer 1 sẽ:
+
+* không lệch schema
+* không cần fallback rule
+* cực dễ viết Layer 2–3–4

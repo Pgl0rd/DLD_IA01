@@ -6,7 +6,8 @@ import struct
 import time
 from collections import deque
 from dataclasses import dataclass
-from typing import Any, Deque, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 try:
     import psutil
@@ -420,10 +421,18 @@ class Flow:
 
     emitted: bool = False
     history: Deque[float] = None
+    gate_state: str = "unknown"  # unknown | allow | block
+    gate_decided_ts: Optional[float] = None
+    pending_packets: Deque[Any] = None
+    source_paths_hint: List[str] = None
 
     def __post_init__(self) -> None:
         if self.history is None:
             self.history = deque(maxlen=64)
+        if self.pending_packets is None:
+            self.pending_packets = deque(maxlen=64)
+        if self.source_paths_hint is None:
+            self.source_paths_hint = []
 
     def add(self, ts: float, size: int, outbound: bool) -> None:
         self.last_ts = ts
@@ -495,6 +504,15 @@ class NetworkSensor:
         self.min_upload_packets = int(
             kwargs.get("min_upload_packets", MIN_UPLOAD_PACKETS)
         )
+        self.enforce_upload_gate = bool(kwargs.get("enforce_upload_gate", False))
+        self.gate_hold_sec = float(kwargs.get("gate_hold_sec", 1.2))
+        self.gate_max_buffer_packets = int(kwargs.get("gate_max_buffer_packets", 32))
+        self.gate_sensitive_exts = {
+            ".doc", ".docx", ".pdf", ".xls", ".xlsx", ".csv", ".sql", ".zip", ".7z", ".env"
+        }
+        self.gate_sensitive_keywords = {
+            "payroll", "salary", "finance", "customer", "secret", "confidential", "hr", "employee"
+        }
 
     # -----------------------------------------------------
     # Core helpers
@@ -584,6 +602,81 @@ class NetworkSensor:
 
         self.proc_cache[pid] = info
         return info
+
+    # Extensions likely to be uploaded as attachments / media
+    _UPLOADABLE_EXTS: frozenset = frozenset({
+        # Images
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".tiff", ".heic", ".heif", ".svg",
+        # Videos
+        ".mp4", ".mov", ".avi", ".mkv", ".webm", ".3gp", ".wmv", ".flv",
+        # Documents
+        ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".ppt",
+        ".txt", ".csv", ".rtf", ".odt", ".ods",
+        # Archives / compressed
+        ".zip", ".rar", ".7z", ".tar", ".gz", ".bz2",
+        # Code / data
+        ".json", ".xml", ".sql", ".env", ".py", ".js", ".ts",
+    })
+
+    def get_open_files_hint(self, pid: Optional[int]) -> List[str]:
+        """
+        Snapshot files currently open by `pid`, filtered to uploadable extensions.
+
+        Not cached — open file list is volatile and must be queried at event time.
+        Returns at most 8 paths sorted by relevance (media/docs first).
+        """
+        if pid is None or psutil is None:
+            return []
+        try:
+            p = psutil.Process(pid)
+            media: List[str] = []
+            docs: List[str] = []
+            for f in p.open_files():
+                fp = getattr(f, "path", None)
+                if not fp:
+                    continue
+                ext = Path(fp).suffix.lower()
+                if ext not in self._UPLOADABLE_EXTS:
+                    continue
+                if ext in {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp",
+                           ".tiff", ".heic", ".mp4", ".mov", ".avi", ".mkv"}:
+                    media.append(fp)
+                else:
+                    docs.append(fp)
+            combined = media + docs
+            return combined[:8]
+        except Exception:
+            return []
+
+    def _update_flow_source_hints(self, flow: Flow, pid: Optional[int]) -> None:
+        hints = self.get_open_files_hint(pid)
+        if not hints:
+            return
+        existing = set(flow.source_paths_hint or [])
+        for hp in hints:
+            if hp and hp not in existing:
+                flow.source_paths_hint.append(hp)
+                existing.add(hp)
+        if len(flow.source_paths_hint) > 16:
+            flow.source_paths_hint = flow.source_paths_hint[:16]
+
+    def _should_block_upload_flow(self, flow: Flow, domain: Optional[str], ctx: Dict[str, Any], proc_name: Optional[str]) -> bool:
+        d = _safe_lower(domain)
+        process_tags = [str(x).lower() for x in (ctx.get("process_tags") or [])]
+        app = _safe_lower(ctx.get("fg_app") or proc_name)
+        is_external_sink = bool(d) and (self.looks_cloud_domain(d) or "zalo" in d or "discord" in d or "slack" in d)
+        is_messaging_sink = ("messaging_or_collab" in process_tags) or any(x in app for x in ["zalo", "discord", "telegram", "whatsapp", "slack", "teams"])
+        if not (is_external_sink or is_messaging_sink):
+            return False
+
+        for p in flow.source_paths_hint or []:
+            pl = str(p).lower()
+            ext = Path(pl).suffix.lower()
+            if ext in self.gate_sensitive_exts:
+                return True
+            if any(k in pl for k in self.gate_sensitive_keywords):
+                return True
+        return False
 
     def effective_proc_name(self, proc_name: Optional[str], ctx: Optional[Dict[str, Any]] = None) -> str:
         ctx = ctx or {}
@@ -1051,6 +1144,12 @@ class NetworkSensor:
         proc_name = proc.get("process")
         domain = self.choose_domain(ctx, dst_ip, proc=proc)
 
+        # Best-effort: snapshot open file handles of the uploading process
+        open_files_hint: List[str] = self.get_open_files_hint(flow.pid)
+        _primary_file: Optional[str] = open_files_hint[0] if open_files_hint else None
+        _primary_name = Path(_primary_file).name if _primary_file else None
+        _primary_ext = Path(_primary_file).suffix.lower() if _primary_file else None
+
         if not self.is_likely_upload(flow, proc_name, domain, proto, ctx=ctx):
             return
 
@@ -1092,18 +1191,19 @@ class NetworkSensor:
                 "service_category": service_category,
             },
             "object": {
-                "path": None,
+                "path": _primary_file,
                 "dst_path": None,
-                "name": None,
-                "ext": None,
+                "name": _primary_name,
+                "ext": _primary_ext,
                 "size": None,
-                "exists": None,
+                "exists": True if _primary_file else None,
                 "drive": None,
                 "volume_type": None,
                 "cloud_provider": "gpt" if looks_gpt else ("cloud" if self.looks_cloud_domain(domain) else None),
                 "bytes": flow.bytes_out,
                 "dest": domain or dst_ip,
                 "dest_display": f"{service_name} ({domain})" if domain and not _looks_ip(domain) else service_name,
+                "open_files_hint": open_files_hint if open_files_hint else None,
             },
             "network": network_block,
             "src": src_block,
@@ -1156,6 +1256,8 @@ class NetworkSensor:
                     "content_type_inferred": inferred_content_type,
                     "method_is_inferred_only": True,
                     "content_type_is_inferred_only": True,
+                    "open_files_hint": open_files_hint if open_files_hint else None,
+                    "open_files_hint_count": len(open_files_hint),
                 }
             },
         }
@@ -1262,6 +1364,9 @@ class NetworkSensor:
                     except Exception:
                         pass
 
+                    reinject_mode = bool(self.enforce_upload_gate and not self.prefer_sniff)
+                    blocked_now = False
+
                     proto = None
                     src_port = 0
                     dst_port = 0
@@ -1271,14 +1376,20 @@ class NetworkSensor:
                         src_port = packet.tcp.src_port
                         dst_port = packet.tcp.dst_port
                         if dst_port not in UPLOAD_TCP_PORTS:
+                            if reinject_mode:
+                                w.send(packet)
                             continue
                     elif getattr(packet, "udp", None):
                         proto = "UDP"
                         src_port = packet.udp.src_port
                         dst_port = packet.udp.dst_port
                         if dst_port not in UPLOAD_UDP_PORTS:
+                            if reinject_mode:
+                                w.send(packet)
                             continue
                     else:
+                        if reinject_mode:
+                            w.send(packet)
                         continue
 
                     src_ip = packet.src_addr
@@ -1286,9 +1397,13 @@ class NetworkSensor:
 
                     outbound = infer_outbound(packet, src_ip, dst_ip)
                     if not outbound:
+                        if reinject_mode:
+                            w.send(packet)
                         continue
 
                     if is_private(dst_ip):
+                        if reinject_mode:
+                            w.send(packet)
                         continue
 
                     try:
@@ -1306,6 +1421,8 @@ class NetworkSensor:
 
                     if self.only_upload_processes and pid is not None and not self.is_upload_process(proc_name, current_ctx):
                         self.cleanup_idle_flows(ts, ctx_provider=ctx)
+                        if reinject_mode:
+                            w.send(packet)
                         continue
 
                     key = (src_ip, src_port, dst_ip, dst_port, proto)
@@ -1325,6 +1442,7 @@ class NetworkSensor:
 
                     domain = self.choose_domain(current_ctx, dst_ip, proc=proc)
                     service_name = self.infer_service_name(domain, proc=proc, ctx=current_ctx)
+                    self._update_flow_source_hints(flow, pid)
 
                     self._dbg(
                         "FLOW",
@@ -1353,7 +1471,39 @@ class NetworkSensor:
                     if self.is_likely_upload(flow, proc_name, domain, proto, ctx=current_ctx):
                         self.emit_upload_summary(ts, key, flow, ctx_provider=ctx)
 
+                    if reinject_mode:
+                        # Hold first packets briefly so we can collect source-path hints before deciding.
+                        if flow.gate_state == "unknown":
+                            should_block = self._should_block_upload_flow(flow, domain, current_ctx, proc_name)
+                            gate_timed_out = (ts - flow.first_ts) >= self.gate_hold_sec
+                            if should_block:
+                                flow.gate_state = "block"
+                                flow.gate_decided_ts = ts
+                            elif gate_timed_out:
+                                flow.gate_state = "allow"
+                                flow.gate_decided_ts = ts
+
+                        if flow.gate_state == "unknown":
+                            if len(flow.pending_packets) < self.gate_max_buffer_packets:
+                                flow.pending_packets.append(packet)
+                            else:
+                                flow.gate_state = "allow"
+                                flow.gate_decided_ts = ts
+
+                        if flow.gate_state == "allow":
+                            while flow.pending_packets:
+                                try:
+                                    w.send(flow.pending_packets.popleft())
+                                except Exception:
+                                    break
+                            w.send(packet)
+                        elif flow.gate_state == "block":
+                            blocked_now = True
+
                     self.cleanup_idle_flows(ts, ctx_provider=ctx)
+
+                    if reinject_mode and blocked_now:
+                        continue
 
                 except Exception as e:
                     self._dbg("loop error:", repr(e))
@@ -1361,6 +1511,15 @@ class NetworkSensor:
 
         ts = now()
         for key, flow in list(self.flows.items()):
+            if self.enforce_upload_gate and (not self.prefer_sniff):
+                # On shutdown, fail-open for undecided flows to avoid stuck connections.
+                flow.gate_state = flow.gate_state if flow.gate_state != "unknown" else "allow"
+                if flow.gate_state == "allow":
+                    while flow.pending_packets:
+                        try:
+                            w.send(flow.pending_packets.popleft())
+                        except Exception:
+                            break
             self.emit_upload_summary(ts, key, flow, ctx_provider=ctx)
         self.flows.clear()
 
