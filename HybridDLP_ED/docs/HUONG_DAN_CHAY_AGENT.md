@@ -116,6 +116,81 @@ python -m agent.sensor
 
 Cần cấu hình extension/native messaging gửi đúng host/port và định dạng message mà `browser_upload_sensor` mong đợi.
 
+#### Setup đầy đủ cho `browser_upload_sensor` (CMD)
+
+1) **Cài extension (Chrome/Edge) ở chế độ Developer**
+
+- Mở `chrome://extensions` (hoặc `edge://extensions`)
+- Bật **Developer mode**
+- Chọn **Load unpacked**
+- Trỏ tới thư mục:
+  - `C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\agent\browser_extension`
+- Copy **Extension ID** vừa tạo (ví dụ: `pafbpfhlcnllebdecgfbpoofcccfbhdf`)
+
+2) **Cập nhật `allowed_origins` trong native host manifest**
+
+Mở file `agent\native_host\native_host.json`, sửa:
+
+```json
+"allowed_origins": [
+  "chrome-extension://<EXTENSION_ID>/"
+]
+```
+
+> Với Edge Chromium, vẫn dùng định dạng `chrome-extension://<EXTENSION_ID>/`.
+
+3) **Đăng ký Native Messaging Host vào Registry (HKCU)**
+
+```bat
+cd /d C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED
+python .\agent\native_host\install_host.py
+```
+
+Lệnh này sẽ:
+- tự cập nhật trường `path` trong `native_host.json` trỏ đúng `native_host.bat`
+- ghi key registry cho Chrome/Edge:
+  - `HKCU\Software\Google\Chrome\NativeMessagingHosts\com.dlp.browser_upload`
+  - `HKCU\Software\Microsoft\Edge\NativeMessagingHosts\com.dlp.browser_upload`
+
+4) **Khởi động lại browser** (đóng/mở lại Chrome/Edge) để nhận registry mới.
+
+5) **Chạy sensor browser upload**
+
+```bat
+cd /d C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED
+set SENSOR_ONLY=browser_upload_sensor
+set BROWSER_UPLOAD_SENSOR=1
+set BROWSER_UPLOAD_HOST=127.0.0.1
+set BROWSER_UPLOAD_PORT=47266
+python -m agent.sensor
+```
+
+6) **Test kết nối native host (tuỳ chọn)**
+
+Mở terminal khác:
+
+```bat
+cd /d C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED
+python .\agent\native_host\native_host.py --test
+```
+
+Nếu thành công sẽ có log kiểu `Event sent successfully`.
+
+7) **Verify event đã vào JSONL**
+
+```bat
+cd /d C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED
+python -c "import json,glob; p=sorted(glob.glob(r'agent/runtime/events_*.jsonl'))[-1]; c=0; \
+f=open(p,encoding='utf-8',errors='ignore'); \
+[print(x.strip()) for x in f if x.strip() and json.loads(x).get('source') in ('browser_upload','browser_upload_sensor')];"
+```
+
+Nếu không thấy event:
+- kiểm tra `allowed_origins` có đúng Extension ID hiện tại không
+- remove/reload extension sau khi sửa `manifest.json` hoặc `native_host.json`
+- chạy lại `install_host.py`
+- kiểm tra log `agent\native_host\native_host.log`
+
 ### 5.4. Chạy riêng từng sensor (mới)
 
 | Biến | Ví dụ | Ý nghĩa |
