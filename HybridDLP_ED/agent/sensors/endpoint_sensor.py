@@ -82,14 +82,100 @@ class EndpointSensor:
         watch_processes: Optional[Set[str]] = None,
         poll_interval_sec: float = 0.8,
         read_refresh_sec: float = 3.0,
+        max_files_per_process_per_scan: int = 8,
     ):
         self.qm = queue_manager
         self.poll_interval_sec = float(poll_interval_sec)
         self.read_refresh_sec = float(read_refresh_sec)
         self.watch_paths = [str(Path(p).resolve()) for p in (watch_paths or []) if p]
         self.watch_processes = {str(x).lower() for x in (watch_processes or set()) if x}
+        self.max_files_per_process_per_scan = max(1, int(max_files_per_process_per_scan))
         self._active: Dict[Tuple[int, str], float] = {}
         self._last_read_emit: Dict[Tuple[int, str], float] = {}
+        self._include_system_paths = os.getenv("ENDPOINT_INCLUDE_SYSTEM_PATHS", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self._noisy_processes: Set[str] = {
+            "svchost.exe",
+            "backgroundtaskhost.exe",
+            "wmiprvse.exe",
+            "officeclicktorun.exe",
+            "sqlwriter.exe",
+            "rstmwservice.exe",
+            "wavesaudioservice.exe",
+            "wavessyssvc64.exe",
+            "wavessvc64.exe",
+            "ovpnhelper_service.exe",
+        }
+        self._noise_path_tokens = (
+            "\\windows\\",
+            "\\program files\\",
+            "\\program files (x86)\\",
+            "\\programdata\\",
+            "\\appdata\\",
+            "\\$recycle.bin\\",
+            "\\system volume information\\",
+            "\\appdata\\local\\programs\\",
+            "\\appdata\\local\\packages\\",
+            "\\appdata\\local\\temp\\",
+            "\\appdata\\local\\google\\chrome\\user data\\",
+            "\\appdata\\local\\microsoft\\edge\\user data\\",
+            "\\appdata\\local\\coccoc\\browser\\user data\\",
+            "\\appdata\\locallow\\",
+            "\\appdata\\locallow\\intel\\shadercache\\",
+            "\\appdata\\roaming\\zalodata\\",
+            "\\appdata\\roaming\\openvpn connect\\",
+            "\\cache\\",
+            "\\code cache\\",
+            "\\dawncache\\",
+            "\\local storage\\leveldb\\",
+            "\\session storage\\",
+            "\\webstorage\\",
+            "\\gpucache\\",
+            "\\indexeddb\\",
+            "\\service worker\\",
+            "\\logs\\",
+            "\\programdata\\a00a6de3-ad8e-4f51-8148-1c16dada4e47\\delloptimizer\\gains\\",
+        )
+        self._noise_extensions = {
+            ".mui",
+            ".nlp",
+            ".dll",
+            ".pak",
+            ".asar",
+            ".tmp",
+            ".log",
+            ".wal",
+            ".shm",
+            ".map",
+            ".dat",
+            ".db",
+            ".db-wal",
+            ".db-shm",
+            ".db-journal",
+            ".sqlite-wal",
+            ".sqlite-shm",
+            ".vscdb",
+            ".vscdb-wal",
+            ".vscdb-shm",
+            ".vscdb-journal",
+            ".ldb",
+            ".pma",
+            ".vsidx",
+            ".idx",
+            ".pdb",
+            ".bin",
+        }
+        self._noise_basenames = {
+            "dips",
+            "history",
+            "history-journal",
+            "cookies",
+            "cookies-journal",
+            "web data",
+            "web data-journal",
+            "network persistent state",
+            "preferences",
+            "secure preferences",
+        }
 
     def _emit(self, evt: Dict[str, Any]) -> None:
         try:
@@ -110,10 +196,29 @@ class EndpointSensor:
         rp = str(Path(path).resolve())
         return any(rp.startswith(root) for root in self.watch_paths)
 
+    def _should_ignore(self, path: str, process_name: str) -> bool:
+        lp = (path or "").lower()
+        pn = (process_name or "").lower()
+
+        if not self._include_system_paths:
+            if any(tok in lp for tok in self._noise_path_tokens):
+                return True
+            try:
+                if Path(lp).suffix.lower() in self._noise_extensions:
+                    return True
+                if Path(lp).name.lower() in self._noise_basenames:
+                    return True
+            except Exception:
+                pass
+            if pn in self._noisy_processes:
+                return True
+        return False
+
     def _collect(self) -> List[Dict[str, Any]]:
         if psutil is None:
             return []
         out: List[Dict[str, Any]] = []
+        per_process_count: Dict[str, int] = {}
         for p in psutil.process_iter(attrs=["pid", "name", "username", "exe", "cmdline"]):
             try:
                 info = p.info or {}
@@ -121,9 +226,14 @@ class EndpointSensor:
                 if self.watch_processes and pname not in self.watch_processes:
                     continue
                 for f in p.open_files() or []:
+                    if per_process_count.get(pname, 0) >= self.max_files_per_process_per_scan:
+                        break
                     fp = getattr(f, "path", None)
                     if not fp or not self._is_watched_path(fp):
                         continue
+                    if self._should_ignore(str(fp), pname):
+                        continue
+                    per_process_count[pname] = per_process_count.get(pname, 0) + 1
                     out.append(
                         {
                             "pid": int(info.get("pid") or 0),

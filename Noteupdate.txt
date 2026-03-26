@@ -191,7 +191,7 @@ context_correlator
 file_sensor
 process_sensor hỗ trợ actor/process
 
-Rule 4 — Bulk File Copy
+Rule 4 — Bulk File Copy - nên sửa thành bulk copy file trong vòng 10s
 Mục tiêu: phát hiện copy hàng loạt file ra external destination. Rule hiện dùng ngưỡng file_count >= 50.
 behavioral_rules
 Điều kiện trigger

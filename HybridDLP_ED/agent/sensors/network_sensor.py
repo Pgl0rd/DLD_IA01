@@ -390,6 +390,7 @@ GPT_DOMAIN_HINTS = [
 FLOW_IDLE_TIMEOUT_SEC = 12
 FLOW_CLEANUP_INTERVAL_SEC = 2
 DNS_CACHE_TTL_SEC = 900
+EVENT_DEDUP_WINDOW_SEC = 45.0
 
 MIN_UPLOAD_BYTES_BROWSER = 64 * 1024
 MIN_UPLOAD_BYTES_TOOL = 32 * 1024
@@ -513,6 +514,34 @@ class NetworkSensor:
         self.gate_sensitive_keywords = {
             "payroll", "salary", "finance", "customer", "secret", "confidential", "hr", "employee"
         }
+        self._summary_dedup_window_sec = float(kwargs.get("summary_dedup_window_sec", EVENT_DEDUP_WINDOW_SEC))
+        self._recent_summary_keys: Dict[str, float] = {}
+        self._noisy_processes = {
+            "svchost.exe",
+            "runtimebroker.exe",
+            "backgroundtaskhost.exe",
+            "searchhost.exe",
+            "searchindexer.exe",
+            "widgets.exe",
+            "widgetservice.exe",
+            "msedgewebview2.exe",
+            "onedrivestandaloneupdater.exe",
+            "mousocoreworker.exe",
+            "tiworker.exe",
+            "trustedinstaller.exe",
+        }
+        self._noisy_domain_tokens = (
+            "windowsupdate",
+            "delivery.mp.microsoft.com",
+            "msftconnecttest",
+            "msedge.api",
+            "officecdn.microsoft.com",
+            "gvt1.com",
+            "googleapis.com",
+            "telemetry",
+            "sentry.io",
+            "crashlytics",
+        )
 
     # -----------------------------------------------------
     # Core helpers
@@ -523,6 +552,31 @@ class NetworkSensor:
             self.qm.enqueue_event(evt)
         except Exception:
             pass
+
+    def _cleanup_recent_summary_keys(self, ts: float) -> None:
+        cutoff = ts - self._summary_dedup_window_sec
+        stale = [k for k, last_ts in self._recent_summary_keys.items() if last_ts < cutoff]
+        for k in stale:
+            self._recent_summary_keys.pop(k, None)
+
+    def _should_suppress_network_noise(self, proc_name: Optional[str], domain: Optional[str]) -> bool:
+        pn = _safe_lower(proc_name)
+        dm = _safe_lower(domain)
+        if pn in self._noisy_processes:
+            return True
+        if dm and any(tok in dm for tok in self._noisy_domain_tokens):
+            return True
+        return False
+
+    def _summary_dedup_key(self, proc_name: Optional[str], domain: Optional[str], dst_ip: str, dst_port: int, proto: str) -> str:
+        return "|".join(
+            [
+                _safe_lower(proc_name),
+                _safe_lower(domain) or _safe_lower(dst_ip),
+                str(dst_port),
+                _safe_lower(proto),
+            ]
+        )
 
     def _dbg(self, *args) -> None:
         if self.debug:
@@ -1143,6 +1197,8 @@ class NetworkSensor:
         proc = self.get_proc_info(flow.pid)
         proc_name = proc.get("process")
         domain = self.choose_domain(ctx, dst_ip, proc=proc)
+        if self._should_suppress_network_noise(proc_name, domain):
+            return
 
         # Best-effort: snapshot open file handles of the uploading process
         open_files_hint: List[str] = self.get_open_files_hint(flow.pid)
@@ -1151,6 +1207,12 @@ class NetworkSensor:
         _primary_ext = Path(_primary_file).suffix.lower() if _primary_file else None
 
         if not self.is_likely_upload(flow, proc_name, domain, proto, ctx=ctx):
+            return
+
+        self._cleanup_recent_summary_keys(ts)
+        dedup_key = self._summary_dedup_key(proc_name, domain, dst_ip, dst_port, proto)
+        last_emit = self._recent_summary_keys.get(dedup_key)
+        if last_emit is not None and (ts - last_emit) < self._summary_dedup_window_sec:
             return
 
         actor_block = self.build_actor_block(proc, ctx=ctx)
@@ -1263,6 +1325,7 @@ class NetworkSensor:
         }
 
         flow.emitted = True
+        self._recent_summary_keys[dedup_key] = ts
         self._dbg(
             "EMIT",
             evt["type"],

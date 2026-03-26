@@ -387,6 +387,54 @@ def _normalize_object_fields(e: Dict[str, Any]) -> None:
     obj["sensitivity"] = _coalesce(_norm_str(obj.get("sensitivity"), 128), _derive_object_sensitivity(e))
 
 
+def _backfill_legacy_aliases(e: Dict[str, Any]) -> None:
+    """
+    Keep old report/legacy fields aligned with canonical blocks so behavioral rules
+    keep working even when a specific sensor only emits canonical structure.
+    """
+    obj = _ensure_block(e, "object")
+    metrics = _ensure_block(e, "metrics")
+    flags = _ensure_block(e, "flags")
+    clipboard = _ensure_block(e, "clipboard")
+    network = _ensure_block(e, "network")
+    pr = _ensure_block(e, "print")
+    operation = _ensure_block(e, "operation")
+
+    # File/object aliases
+    e["File_Path"] = _coalesce(e.get("File_Path"), obj.get("path"))
+    e["Dest_Path"] = _coalesce(e.get("Dest_Path"), obj.get("dst_path"), e.get("dst_path"))
+    e["File_Sensitivity"] = _coalesce(e.get("File_Sensitivity"), obj.get("sensitivity"))
+    e["Old_Extension"] = _coalesce(e.get("Old_Extension"), obj.get("old_ext"))
+    e["New_Extension"] = _coalesce(e.get("New_Extension"), obj.get("new_ext"))
+    e["Dest_Volume_Type"] = _coalesce(e.get("Dest_Volume_Type"), obj.get("dest_volume_type"), obj.get("volume_type"))
+    e["Source_Drive"] = _coalesce(e.get("Source_Drive"), obj.get("src_drive"), obj.get("drive"))
+    e["Dest_Drive"] = _coalesce(e.get("Dest_Drive"), obj.get("dest_drive"), obj.get("drive"))
+
+    # Generic metrics/flags aliases
+    e["File_Count"] = _coalesce(e.get("File_Count"), metrics.get("file_count"))
+    e["Password_Flag"] = _coalesce(e.get("Password_Flag"), flags.get("password_protected"))
+
+    # Clipboard aliases used by some rules/reporters
+    if e.get("content") is None or not isinstance(e.get("content"), dict):
+        e["content"] = {}
+    e["content"]["sample"] = _coalesce(e["content"].get("sample"), clipboard.get("text_file"), clipboard.get("content"))
+    e["content"]["sample_len"] = _coalesce(
+        e["content"].get("sample_len"),
+        len(e["content"]["sample"]) if isinstance(e["content"].get("sample"), str) else None,
+    )
+
+    # Network aliases
+    if "file_path" not in e or not e.get("file_path"):
+        e["file_path"] = _coalesce(obj.get("path"), e.get("File_Path"))
+    if "dest_domain" not in e or not e.get("dest_domain"):
+        e["dest_domain"] = _coalesce(network.get("dest_domain"), _ensure_block(e, "context").get("dest_domain"))
+
+    # Print aliases
+    e["Printed_File_Path"] = _coalesce(e.get("Printed_File_Path"), pr.get("printed_file_path"), pr.get("printed_file_path_hint"), obj.get("path"))
+    e["Printer_Type"] = _coalesce(e.get("Printer_Type"), pr.get("printer_type"))
+    e["Application_Source"] = _coalesce(e.get("Application_Source"), operation.get("tool"))
+
+
 def _normalize_top_level(e: Dict[str, Any]) -> None:
     if not e.get("event_id"):
         e["event_id"] = str(uuid.uuid4())
@@ -448,6 +496,7 @@ def adapt_for_queue(evt: Dict[str, Any]) -> Dict[str, Any]:
     _normalize_clipboard_fields(e)
     _normalize_network_fields(e)
     _normalize_object_fields(e)
+    _backfill_legacy_aliases(e)
 
     e["severity"] = _sev_to_str(e.get("severity"))
 

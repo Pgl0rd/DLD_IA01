@@ -932,6 +932,7 @@ class BulkFileCopyRule(BehavioralRule):
             severity="medium"
         )
         self.file_count_threshold = 50  # Số file trong cửa sổ thời gian
+        self.preferred_window_sec = 10
     
     def check(self, event: Dict[str, Any], fast_scan_result: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """Check bulk file copy"""
@@ -940,8 +941,12 @@ class BulkFileCopyRule(BehavioralRule):
         raw_obj = raw_original.get('object', {}) or {}
 
         metrics = event.get('metrics', {}) or {}
+        # Prefer explicit 10s counters if sensor provides them; fallback to legacy File_Count.
         file_count = (
-            metrics.get('file_count')
+            metrics.get('file_count_10s')
+            or raw_metrics.get('file_count_10s')
+            or event.get('File_Count_10s')
+            or metrics.get('file_count')
             or raw_metrics.get('file_count')
             or event.get('File_Count')
             or 0
@@ -967,8 +972,9 @@ class BulkFileCopyRule(BehavioralRule):
                     'rule_name': self.name,
                     'severity': self.severity,
                     'file_count': file_count,
+                    'window_sec': self.preferred_window_sec,
                     'dest_volume_type': dest_volume_type,
-                    'reason': f"Copy {file_count} files ra thiết bị ngoài"
+                    'reason': f"Copy {file_count} files ra thiết bị ngoài trong ~{self.preferred_window_sec}s"
                 }
 
         return False, {}

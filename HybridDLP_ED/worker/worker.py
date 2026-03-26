@@ -254,6 +254,16 @@ class DetectionEngine:
                         )
                 except Exception as e:
                     logger.error(f"Error in ML anomaly detection: {e}")
+            # Bridge UEBA output into deep_analysis payload for scoring engines that
+            # still read anomaly info from deep_analysis.
+            try:
+                ml_score_0_100 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = ml_score_0_100
+                deep_analysis_result['ml_is_anomaly'] = bool(ml_anomaly_result.get('is_anomaly', False))
+                # ResearchBasedRiskScoringEngine expects anomaly_score roughly in [-1, 1].
+                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_100 / 50.0) - 1.0))
+            except Exception:
+                pass
             
             # 6. Risk Scoring
             # Chuẩn hoá context cho RiskScoringEngine
@@ -737,6 +747,13 @@ class DetectionEngine:
                         )
                 except Exception as e:
                     logger.error(f"Error in ML anomaly detection (special event): {e}")
+            try:
+                ml_score_0_100 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = ml_score_0_100
+                deep_analysis_result['ml_is_anomaly'] = bool(ml_anomaly_result.get('is_anomaly', False))
+                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_100 / 50.0) - 1.0))
+            except Exception:
+                pass
             
             # 2. Risk Scoring
             ctx = event.get('context', {}) or {}

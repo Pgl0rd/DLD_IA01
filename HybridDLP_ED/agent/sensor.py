@@ -288,6 +288,78 @@ def consumer_loop(
     sinks: List[Any],
     correlator: Optional[ContextCorrelator] = None,
 ) -> None:
+    def _drop_noisy_jsonl_event(e: Dict[str, Any]) -> bool:
+        etype = str(e.get("type") or "").lower()
+        source = str(e.get("source") or "").lower()
+
+        # Always drop heartbeat from JSONL.
+        if etype == "heartbeat":
+            return True
+
+        # Reduce boot-time noise.
+        if etype.endswith("_sensor_started"):
+            return True
+
+        # Central noise guard for file/endpoint events.
+        if etype in {"file_open", "file_read", "file_close", "file_modified"} and source in {"endpoint", "file"}:
+            actor = e.get("actor") if isinstance(e.get("actor"), dict) else {}
+            obj = e.get("object") if isinstance(e.get("object"), dict) else {}
+            pname = str(actor.get("process") or "").lower()
+            path = str(obj.get("path") or "").lower()
+            ext = str(obj.get("ext") or "").lower()
+            name = str(obj.get("name") or "").lower()
+
+            noisy_processes = {
+                "svchost.exe",
+                "wmiprvse.exe",
+                "backgroundtaskhost.exe",
+                "searchhost.exe",
+                "startmenuexperiencehost.exe",
+                "msedgewebview2.exe",
+            }
+            if pname in noisy_processes:
+                return True
+
+            noisy_path_tokens = (
+                "\\appdata\\local\\programs\\",
+                "\\appdata\\local\\packages\\",
+                "\\appdata\\local\\temp\\",
+                "\\appdata\\local\\microsoft\\edge\\user data\\",
+                "\\appdata\\local\\google\\chrome\\user data\\",
+                "\\appdata\\roaming\\cursor\\",
+                "\\windows\\",
+                "\\program files\\",
+                "\\program files (x86)\\",
+                "\\cache\\",
+                "\\code cache\\",
+                "\\gpucache\\",
+                "\\indexeddb\\",
+                "\\service worker\\",
+                "\\logs\\",
+            )
+            if any(tok in path for tok in noisy_path_tokens):
+                return True
+
+            noisy_exts = {
+                ".tmp", ".temp", ".log", ".log2", ".mui", ".nlp", ".dll", ".pak", ".asar",
+                ".wal", ".shm", ".map", ".dat", ".db", ".db-wal", ".db-shm", ".db-journal",
+                ".sqlite", ".sqlite-wal", ".sqlite-shm",
+                ".ldb", ".idx", ".pma", ".vsidx", ".vscdb", ".vscdb-wal", ".vscdb-shm", ".vscdb-journal",
+                ".bin", ".lock", ".journal",
+            }
+            if ext in noisy_exts:
+                return True
+
+            noisy_names = {
+                "dips", "history", "history-journal", "cookies", "cookies-journal",
+                "web data", "web data-journal", "network persistent state",
+                "preferences", "secure preferences",
+            }
+            if name in noisy_names:
+                return True
+
+        return False
+
     while (not stop_event.is_set()) or (not qm.event_queue.empty()):
         try:
             event = qm.event_queue.get(timeout=0.5)
@@ -308,6 +380,9 @@ def consumer_loop(
             event_canon = canonicalize_event(event)
             for s in sinks:
                 try:
+                    # Noise control on JSONL sink only.
+                    if isinstance(s, JsonlFileSink) and _drop_noisy_jsonl_event(event_canon):
+                        continue
                     s.write(event_canon)
                 except Exception:
                     pass
@@ -398,30 +473,55 @@ def sensor_thread_runner(
     stop_event: threading.Event,
     *args,
 ) -> None:
-    try:
-        qm.enqueue_event(
-            {
-                "type": f"{sensor_name}_started",
-                "severity": "info",
-                "source": "l1",
-                "sensor": sensor_name,
-                "ts": time.time(),
-            }
-        )
-        target(*args)
-    except Exception as e:
-        qm.enqueue_event(
-            {
-                "type": f"{sensor_name}_error",
-                "severity": "high",
-                "source": "l1",
-                "sensor": sensor_name,
-                "error": repr(e),
-                "traceback": traceback.format_exc(),
-                "ts": time.time(),
-            }
-        )
-        stop_event.set()
+    """
+    Chạy sensor trong thread. Nếu một sensor lỗi (vd. network_sensor không có quyền WinDivert),
+    chỉ ghi *_error và thử lại sau backoff — KHÔNG dừng toàn bộ agent để các sensor khác
+    vẫn lắng nghe sự kiện.
+    """
+    qm.enqueue_event(
+        {
+            "type": f"{sensor_name}_started",
+            "severity": "info",
+            "source": "l1",
+            "sensor": sensor_name,
+            "ts": time.time(),
+        }
+    )
+    initial = float(os.getenv("SENSOR_RETRY_INITIAL_SEC", "2.0"))
+    max_backoff = float(os.getenv("SENSOR_RETRY_MAX_SEC", "60.0"))
+    backoff = max(0.5, initial)
+    fatal_on_error = os.getenv("SENSOR_FATAL_ON_ERROR", "0").strip().lower() in {"1", "true", "yes", "on"}
+
+    while not stop_event.is_set():
+        try:
+            target(*args)
+            return
+        except Exception as e:
+            qm.enqueue_event(
+                {
+                    "type": f"{sensor_name}_error",
+                    "severity": "high",
+                    "source": "l1",
+                    "sensor": sensor_name,
+                    "error": repr(e),
+                    "traceback": traceback.format_exc(),
+                    "recoverable": not fatal_on_error,
+                    "ts": time.time(),
+                }
+            )
+            if fatal_on_error:
+                stop_event.set()
+                return
+            if stop_event.is_set():
+                return
+            # Chờ (có thể bị ngắt bởi stop_event) rồi thử lại run_loop
+            waited = 0.0
+            while waited < backoff and not stop_event.is_set():
+                step = min(0.5, backoff - waited)
+                if stop_event.wait(step):
+                    return
+                waited += step
+            backoff = min(max_backoff, backoff * 1.5)
 
 
 def main() -> None:
@@ -466,6 +566,46 @@ def main() -> None:
             _dedup_watch_paths.append(p)
     watch_paths = _dedup_watch_paths
 
+    # Sensor selection:
+    # - default: all sensors enabled (subject to each sensor's own env flag)
+    # - SENSOR_ONLY=file_sensor (or comma-separated list) to run only specific sensors
+    # - SENSOR_ENABLE_<NAME>=0/1 to explicitly disable/enable each sensor
+    known_sensors = {
+        "file_sensor",
+        "usb_sensor",
+        "clipboard_sensor",
+        "process_sensor",
+        "endpoint_sensor",
+        "network_sensor",
+        "browser_upload_sensor",
+        "print_sensor",
+    }
+    sensor_only_raw = os.getenv("SENSOR_ONLY", "").strip().lower()
+    selected_sensors: Optional[set[str]] = None
+    if sensor_only_raw:
+        parsed = {
+            x.strip().lower()
+            for x in sensor_only_raw.split(",")
+            if x.strip()
+        }
+        if parsed:
+            selected_sensors = {x for x in parsed if x in known_sensors}
+            unknown = sorted(parsed - known_sensors)
+            if unknown:
+                print(f"[main] warning: unknown sensors in SENSOR_ONLY ignored: {unknown}", flush=True)
+            if not selected_sensors:
+                print("[main] warning: SENSOR_ONLY had no valid sensor names; fallback to default all sensors", flush=True)
+                selected_sensors = None
+
+    def _is_enabled(sensor_name: str, default: bool = True) -> bool:
+        env_key = f"SENSOR_ENABLE_{sensor_name.upper()}"
+        env_val = os.getenv(env_key, "").strip().lower()
+        if env_val:
+            return env_val in {"1", "true", "yes", "on"}
+        if selected_sensors is not None:
+            return sensor_name in selected_sensors
+        return default
+
     start_ts = time.time()
     stop_event = threading.Event()
     qm = QueueManager(maxsize=queue_maxsize)
@@ -490,18 +630,37 @@ def main() -> None:
     except Exception:
         ctx = None
 
-    fs_sensor = FileSystemSensor(queue_manager=qm, watch_paths=watch_paths, poll_interval_sec=0.5)
-    usb_sensor = USBSensor(queue_manager=qm, poll_interval_sec=1.0)
+    file_sensor_enabled = _is_enabled("file_sensor", True)
+    usb_sensor_enabled = _is_enabled("usb_sensor", True)
+    clipboard_sensor_enabled = _is_enabled("clipboard_sensor", True)
+    process_sensor_enabled = _is_enabled("process_sensor", True)
+    endpoint_sensor_enabled = _is_enabled("endpoint_sensor", True)
+    print_sensor_enabled = _is_enabled("print_sensor", True)
+    browser_upload_enabled = _is_enabled("browser_upload_sensor", True) and (
+        os.getenv("BROWSER_UPLOAD_SENSOR", "0").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+    fs_sensor = (
+        FileSystemSensor(queue_manager=qm, watch_paths=watch_paths, poll_interval_sec=0.5)
+        if file_sensor_enabled
+        else None
+    )
+    usb_sensor = USBSensor(queue_manager=qm, poll_interval_sec=1.0) if usb_sensor_enabled else None
 
     def on_usb_connected(drive: str) -> None:
-        _safe_call(fs_sensor.add_watch_path, drive)
+        if fs_sensor is not None:
+            _safe_call(fs_sensor.add_watch_path, drive)
 
-    clip_sensor = ClipboardSensor(
-        queue_manager=qm,
-        poll_interval_sec=0.15,
-        min_len=6,
-        preview_len=120,
-        cooldown_sec=0.6,
+    clip_sensor = (
+        ClipboardSensor(
+            queue_manager=qm,
+            poll_interval_sec=0.15,
+            min_len=6,
+            preview_len=120,
+            cooldown_sec=0.6,
+        )
+        if clipboard_sensor_enabled
+        else None
     )
 
     proc_watch = {
@@ -524,45 +683,58 @@ def main() -> None:
         "aws", "gsutil", "az", "azcopy",
     }
 
-    proc_sensor = ProcessSensor(
-        queue_manager=qm,
-        poll_interval_sec=0.5,
-        watch_names=proc_watch,
-        emit_end=True,
-        include_cmdline=True,
-        include_parent=True,
-        include_username=True,
+    proc_sensor = (
+        ProcessSensor(
+            queue_manager=qm,
+            poll_interval_sec=0.5,
+            watch_names=proc_watch,
+            emit_end=True,
+            include_cmdline=True,
+            include_parent=True,
+            include_username=True,
+        )
+        if process_sensor_enabled
+        else None
     )
 
-    endpoint_sensor = EndpointSensor(
-        queue_manager=qm,
-        watch_paths=watch_paths,
-        # Capture open/read across all processes in watched paths
-        # (filtering by process name misses Explorer/Office/editor workflows).
-        watch_processes=None,
-        poll_interval_sec=0.8,
-        read_refresh_sec=3.0,
+    endpoint_sensor = (
+        EndpointSensor(
+            queue_manager=qm,
+            watch_paths=watch_paths,
+            # Capture open/read across all processes in watched paths
+            # (filtering by process name misses Explorer/Office/editor workflows).
+            watch_processes=None,
+            poll_interval_sec=0.8,
+            read_refresh_sec=8.0,
+        )
+        if endpoint_sensor_enabled
+        else None
     )
 
     enforce_upload_gate = os.getenv("NET_ENFORCE_UPLOAD_GATE", "0").strip().lower() in {"1", "true", "yes", "on"}
     prefer_sniff = os.getenv("NET_PREFER_SNIFF", "1").strip().lower() in {"1", "true", "yes", "on"}
     gate_hold_sec = float(os.getenv("NET_GATE_HOLD_SEC", "1.2"))
 
-    net_sensor = NetworkSensor(
-        queue_manager=qm,
-        only_upload_processes=False,
-        prefer_sniff=prefer_sniff,
-        debug=True,
-        min_upload_bytes_browser=64 * 1024,
-        min_upload_bytes_tool=64 * 1024,
-        min_upload_bytes_default=128 * 1024,
-        min_upload_bytes_quic=64 * 1024,
-        enforce_upload_gate=enforce_upload_gate,
-        gate_hold_sec=gate_hold_sec,
+    network_sensor_enabled = _is_enabled("network_sensor", True) and (
+        os.getenv("NETWORK_SENSOR_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
     )
+    net_sensor = None
+    if network_sensor_enabled:
+        net_sensor = NetworkSensor(
+            queue_manager=qm,
+            only_upload_processes=False,
+            prefer_sniff=prefer_sniff,
+            debug=True,
+            min_upload_bytes_browser=64 * 1024,
+            min_upload_bytes_tool=64 * 1024,
+            min_upload_bytes_default=128 * 1024,
+            min_upload_bytes_quic=64 * 1024,
+            enforce_upload_gate=enforce_upload_gate,
+            gate_hold_sec=gate_hold_sec,
+        )
 
     print_sensor = None
-    if _HAS_PRINT:
+    if _HAS_PRINT and print_sensor_enabled:
         try:
             print_sensor = PrintSensor(queue_manager=qm, poll_interval_sec=1.0)  # type: ignore
         except Exception:
@@ -571,11 +743,10 @@ def main() -> None:
     print("[main] started pid=", os.getpid(), flush=True)
     print("[main] watch_paths:", watch_paths, flush=True)
     print("[main] print_sensor:", bool(print_sensor), flush=True)
-    print(f"[main] network_sensor: enabled (prefer_sniff={prefer_sniff}, enforce_upload_gate={enforce_upload_gate}, gate_hold_sec={gate_hold_sec})", flush=True)
-    print("[main] endpoint_sensor: enabled (open/read/close + metadata/content in object)", flush=True)
+    print(f"[main] network_sensor: {'enabled' if network_sensor_enabled else 'disabled'} (prefer_sniff={prefer_sniff}, enforce_upload_gate={enforce_upload_gate}, gate_hold_sec={gate_hold_sec})", flush=True)
+    print(f"[main] endpoint_sensor: {'enabled' if endpoint_sensor is not None else 'disabled'} (open/read/close + metadata/content in object)", flush=True)
     # Browser upload sensor (optional): TCP server that receives newline-delimited JSON
     # from browser native messaging host.
-    browser_upload_enabled = os.getenv("BROWSER_UPLOAD_SENSOR", "0").strip().lower() in {"1", "true", "yes", "on"}
     browser_upload_host = os.getenv("BROWSER_UPLOAD_HOST", "127.0.0.1").strip() or "127.0.0.1"
     browser_upload_port = int(os.getenv("BROWSER_UPLOAD_PORT", "47266"))
     browser_upload_sensor = None
@@ -590,14 +761,62 @@ def main() -> None:
         threading.Thread(name="consumer", target=consumer_loop, args=(stop_event, qm, sinks, correlator), daemon=True),
         threading.Thread(name="heartbeat", target=heartbeat_loop, args=(stop_event, qm, hb_interval_sec, hb_file_interval_sec, start_ts, ctx), daemon=True),
         threading.Thread(name="queue_monitor", target=qm_monitor.loop, args=(stop_event,), daemon=True),
-
-        threading.Thread(name="file_sensor", target=sensor_thread_runner, args=("file_sensor", fs_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
-        threading.Thread(name="usb_sensor", target=sensor_thread_runner, args=("usb_sensor", usb_sensor.run_loop, qm, stop_event, stop_event, on_usb_connected, None, ctx), daemon=True),
-        threading.Thread(name="clipboard_sensor", target=sensor_thread_runner, args=("clipboard_sensor", clip_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
-        threading.Thread(name="process_sensor", target=sensor_thread_runner, args=("process_sensor", proc_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
-        threading.Thread(name="endpoint_sensor", target=sensor_thread_runner, args=("endpoint_sensor", endpoint_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
-        threading.Thread(name="network_sensor", target=sensor_thread_runner, args=("network_sensor", net_sensor.run_loop, qm, stop_event, stop_event, ctx), daemon=True),
     ]
+
+    if fs_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="file_sensor",
+                target=sensor_thread_runner,
+                args=("file_sensor", fs_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
+    if usb_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="usb_sensor",
+                target=sensor_thread_runner,
+                args=("usb_sensor", usb_sensor.run_loop, qm, stop_event, stop_event, on_usb_connected, None, ctx),
+                daemon=True,
+            )
+        )
+    if clip_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="clipboard_sensor",
+                target=sensor_thread_runner,
+                args=("clipboard_sensor", clip_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
+    if proc_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="process_sensor",
+                target=sensor_thread_runner,
+                args=("process_sensor", proc_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
+    if endpoint_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="endpoint_sensor",
+                target=sensor_thread_runner,
+                args=("endpoint_sensor", endpoint_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
+    if net_sensor is not None:
+        threads.append(
+            threading.Thread(
+                name="network_sensor",
+                target=sensor_thread_runner,
+                args=("network_sensor", net_sensor.run_loop, qm, stop_event, stop_event, ctx),
+                daemon=True,
+            )
+        )
 
     if browser_upload_sensor is not None:
         threads.append(

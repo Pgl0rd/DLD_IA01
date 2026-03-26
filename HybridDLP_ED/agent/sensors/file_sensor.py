@@ -419,7 +419,9 @@ if True:
             self.sample_max_chars = int(sample_max_chars)
 
             self.agg_window_sec = float(agg_window_sec)
+            self.bulk_count_window_sec = float(os.getenv("FILE_SENSOR_BULK_WINDOW_SEC", "10.0"))
             self._recent_events: deque[Tuple[float, str]] = deque(maxlen=10000)
+            self._recent_events_short: deque[Tuple[float, str]] = deque(maxlen=10000)
             self._recent_sensitive_artifacts: deque[Tuple[float, str, str]] = deque(maxlen=5000)
             self._recent_files_by_pid: Dict[int, deque[Dict[str, Any]]] = {}
             self._recent_sensitive_by_pid: Dict[int, deque[Dict[str, Any]]] = {}
@@ -444,29 +446,70 @@ if True:
             # Goal: reduce duplicates / false positives from temp caches and fast re-writes.
             self._suppress_modified_until: Dict[str, float] = {}
             self._modified_suppress_window_seconds = 2.0
+            # Dedup/rate-limit knobs (env-configurable to tune without code change).
+            self._event_dedup_window_seconds = float(os.getenv("FILE_SENSOR_DEDUP_WINDOW_SEC", "2.0"))
+            self._proc_rate_window_seconds = float(os.getenv("FILE_SENSOR_PROCESS_WINDOW_SEC", "5.0"))
+            self._max_events_per_process_window = int(os.getenv("FILE_SENSOR_MAX_EVENTS_PER_PROCESS_WINDOW", "40"))
+            self._recent_event_keys: Dict[str, float] = {}
+            self._recent_event_times_by_pid: Dict[str, deque[float]] = {}
             self._noise_path_tokens = (
-                "\\appdata\\local\\temp\\",
-                "\\appdata\\local\\google\\chrome\\user data\\",
-                "\\appdata\\roaming\\cursor\\",
-                "\\appdata\\roaming\\zalodata\\cache\\",
+                "\\windows\\",
+                "\\program files\\",
+                "\\program files (x86)\\",
+                "\\programdata\\",
+                "\\appdata\\",
+                "\\system32\\",
+                "\\$recycle.bin\\",
+                "\\system volume information\\",
                 "\\cache\\",
+                "\\dawncache\\",
+                "\\local storage\\leveldb\\",
+                "\\session storage\\",
+                "\\webstorage\\",
+                "\\Antigravity\\",
                 "\\code cache\\",
                 "\\gpucache\\",
+                "\\Python\\Python312\\",
+                "\\HybridDLP_ED\\",
+                "\\Programs\\cursor\\",
+                "\\Roaming\\GitHub Desktop\\",
+                "\\zalo\\Local Storage\\",
                 "\\network\\",
                 "\\logs\\",
                 "\\indexeddb\\",
                 "\\service worker\\",
+                "\\LocalState\\TabState\\",
+                "\\Microsoft Visual Studio\\",
             )
             self._noise_extensions = {
                 ".tmp",
                 ".temp",
                 ".log",
+                ".mui",
+                ".nlp",
+                ".dll",
+                ".db",
+                ".json",
+                ".jsonl",
                 ".ldb",
                 ".sqlite",
                 ".journal",
                 ".wal",
                 ".idx",
+                ".DB-wal",
                 ".pack",
+                ".pkl",
+                ".db-wal",
+                ".db-journal",
+                ".db-shm",
+                ".db-wal",
+                ".db-journal",
+                ".db-shm",
+                ".db-wal",
+                ".db-journal",
+                ".db-shm",
+                ".bin",
+                ".exe",
             }
 
         def add_watch_path(self, path: str) -> None:
@@ -516,6 +559,54 @@ if True:
             except Exception:
                 pass
 
+        def _event_dedup_key(
+            self,
+            evt_kind: str,
+            src_path: str,
+            dst_path: Optional[str],
+            pid: Optional[Any],
+            proc_name: Optional[str],
+        ) -> str:
+            src = (src_path or "").lower()
+            dst = (dst_path or "").lower()
+            pid_s = str(pid) if pid is not None else "na"
+            proc_s = (proc_name or "").lower()
+            return f"{evt_kind}|{src}|{dst}|{pid_s}|{proc_s}"
+
+        def _cleanup_recent_event_keys(self, now_mono: float) -> None:
+            cutoff = now_mono - self._event_dedup_window_seconds
+            stale = [k for k, ts in self._recent_event_keys.items() if ts < cutoff]
+            for k in stale:
+                self._recent_event_keys.pop(k, None)
+
+        def _should_drop_burst_event(
+            self,
+            evt_kind: str,
+            src_path: str,
+            dst_path: Optional[str],
+            ctx: Dict[str, Any],
+        ) -> bool:
+            now_mono = time.monotonic()
+            self._cleanup_recent_event_keys(now_mono)
+
+            pid = ctx.get("fg_pid")
+            proc_name = ctx.get("fg_app") or ctx.get("fg_process")
+            key = self._event_dedup_key(evt_kind, src_path, dst_path, pid, proc_name)
+            last = self._recent_event_keys.get(key)
+            if last is not None and (now_mono - last) < self._event_dedup_window_seconds:
+                return True
+            self._recent_event_keys[key] = now_mono
+
+            pid_key = str(pid) if pid is not None else "na"
+            dq = self._recent_event_times_by_pid.setdefault(pid_key, deque())
+            cutoff = now_mono - self._proc_rate_window_seconds
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if len(dq) >= self._max_events_per_process_window:
+                return True
+            dq.append(now_mono)
+            return False
+
         def _ctx_snapshot(self, ctx_provider: Optional[Any]) -> Dict[str, Any]:
             if not ctx_provider:
                 return {}
@@ -537,6 +628,13 @@ if True:
             while self._recent_events and self._recent_events[0][0] < cutoff:
                 self._recent_events.popleft()
             return sum(1 for _, b in self._recent_events if b == bucket)
+
+        def _agg_count_short(self, now: float, bucket: str) -> int:
+            self._recent_events_short.append((now, bucket))
+            cutoff = now - self.bulk_count_window_sec
+            while self._recent_events_short and self._recent_events_short[0][0] < cutoff:
+                self._recent_events_short.popleft()
+            return sum(1 for _, b in self._recent_events_short if b == bucket)
 
         def _remember_sensitive_artifact(self, ts: float, path: str, sensitivity: str) -> None:
             if sensitivity not in {"Sensitive", "Highly Sensitive"}:
@@ -679,6 +777,9 @@ if True:
             if self._should_ignore(dp or p):
                 raise RuntimeError("ignored")
 
+            if self._should_drop_burst_event(evt_kind, p, dp, ctx):
+                raise RuntimeError("ignored")
+
             target_for_content = dp or p
 
             src_drive = _maybe_drive_letter(p)
@@ -693,6 +794,7 @@ if True:
             op_type = _infer_op_type(evt_kind, p, dp, effective_volume_type)
             report_event_type = _infer_report_event_type(evt_kind, p, dp)
             report_op_type = _infer_operation_type(evt_kind, p, dp, overwrite=(evt_kind == "modified"), effective_volume_type=effective_volume_type)
+            event_type = "file_renamed" if report_event_type == "Rename" else f"file_{evt_kind}"
 
             old_ext = None
             new_ext = None
@@ -760,6 +862,7 @@ if True:
 
             bucket = effective_drive or "NA"
             file_count_window = self._agg_count(ts, bucket)
+            file_count_10s = self._agg_count_short(ts, bucket)
 
             sensitivity = _classify_sensitivity(target_ext, signature, target_for_content)
             self._remember_sensitive_artifact(ts, target_for_content, sensitivity)
@@ -818,7 +921,7 @@ if True:
             pid_summary = self._recent_pid_summary(ts, proc_id)
 
             evt: Dict[str, Any] = {
-                "type": f"file_{evt_kind}",
+                "type": event_type,
                 "severity": "info",
                 "source": "file",
                 "ts": ts,
@@ -851,6 +954,7 @@ if True:
                     "entropy": entropy,
                     "row_count": None,
                     "file_count": file_count_window,
+                    "file_count_10s": file_count_10s,
                 },
                 "flags": {
                     "password_protected": pw_protected,
@@ -886,6 +990,7 @@ if True:
                 "Command_Line": cmdline,
 
                 "File_Count": file_count_window,
+                "File_Count_10s": file_count_10s,
                 "Entropy_Value": entropy,
                 "Password_Flag": pw_protected,
                 "Original_File_Size": before_size,

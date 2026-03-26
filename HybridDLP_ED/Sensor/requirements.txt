@@ -1,5 +1,0 @@
-cryptography
-psutil
-watchdog
-pywin32
-pyperclip

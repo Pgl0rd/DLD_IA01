@@ -10,6 +10,7 @@ scripts/test_with_docker.py
 scripts/test_worker.py
 scripts/test_file_event.py
 
+
 # Test folders
 worker/tests/
 **/tests/
