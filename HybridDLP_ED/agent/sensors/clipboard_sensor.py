@@ -148,6 +148,8 @@ user32.CallNextHookEx.restype = LRESULT
 
 user32.GetKeyState.argtypes = [wintypes.INT]
 user32.GetKeyState.restype = wintypes.SHORT
+user32.GetAsyncKeyState.argtypes = [wintypes.INT]
+user32.GetAsyncKeyState.restype = wintypes.SHORT
 
 
 class MSG(ctypes.Structure):
@@ -620,8 +622,11 @@ class ClipboardSensor:
 
         self._hook_thread: Optional[threading.Thread] = None
         self._hook_h: Optional[int] = None
+        self._hook_ready: bool = False
         self._hook_stop = threading.Event()
         self._kbd_proc: Optional[Any] = None
+        self._fallback_prev_ctrl_v: bool = False
+        self._fallback_prev_shift_insert: bool = False
 
         self._last_err_emit = 0.0
 
@@ -817,6 +822,31 @@ class ClipboardSensor:
     # =========================
     # Keyboard hook
     # =========================
+    def _poll_paste_hotkey_fallback(self) -> None:
+        """
+        Fallback detector for paste hotkeys when low-level keyboard hook is unavailable.
+        Detects key DOWN edge for Ctrl+V and Shift+Insert.
+        """
+        try:
+            ctrl_down = bool(user32.GetAsyncKeyState(VK_CONTROL) & 0x8000)
+            shift_down = bool(user32.GetAsyncKeyState(VK_SHIFT) & 0x8000)
+            v_down = bool(user32.GetAsyncKeyState(VK_V) & 0x8000)
+            ins_down = bool(user32.GetAsyncKeyState(VK_INSERT) & 0x8000)
+
+            now_ctrl_v = bool(ctrl_down and v_down)
+            now_shift_insert = bool(shift_down and ins_down)
+
+            if (now_ctrl_v and not self._fallback_prev_ctrl_v) or (
+                now_shift_insert and not self._fallback_prev_shift_insert
+            ):
+                with self._lock:
+                    self._paste_requested = True
+
+            self._fallback_prev_ctrl_v = now_ctrl_v
+            self._fallback_prev_shift_insert = now_shift_insert
+        except Exception:
+            pass
+
     def _start_hook(self) -> None:
         if self._hook_thread and self._hook_thread.is_alive():
             return
@@ -856,6 +886,9 @@ class ClipboardSensor:
         hmod = kernel32.GetModuleHandleW(None)
         hhook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self._kbd_proc, hmod, 0)
         self._hook_h = int(hhook) if hhook else None
+        self._hook_ready = bool(self._hook_h)
+        if not self._hook_ready:
+            return
 
         msg = MSG()
         while not self._hook_stop.is_set():
@@ -1139,6 +1172,9 @@ class ClipboardSensor:
             ctx = self._ctx_snapshot(ctx_provider)
 
             try:
+                # fallback key polling helps when WH_KEYBOARD_LL cannot be installed
+                self._poll_paste_hotkey_fallback()
+
                 # ---------- paste inference ----------
                 paste_req = False
                 with self._lock:

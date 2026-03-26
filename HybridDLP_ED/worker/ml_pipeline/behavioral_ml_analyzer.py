@@ -10,6 +10,24 @@ from loguru import logger
 from .feature_extractor import EventFeatureExtractor
 
 
+def _normalize_anomaly_raw(raw_score: float) -> float:
+    """
+    Normalize IsolationForest raw decision score to [0,100] using configurable policy.
+    """
+    from config import WorkerConfig
+    method = (WorkerConfig.ML_ANOMALY_NORM_METHOD or "percentile").lower()
+    if method == "minmax":
+        lo = float(WorkerConfig.ML_ANOMALY_MIN)
+        hi = float(WorkerConfig.ML_ANOMALY_MAX)
+    else:
+        lo = float(WorkerConfig.ML_ANOMALY_P5)
+        hi = float(WorkerConfig.ML_ANOMALY_P95)
+    if hi <= lo:
+        lo, hi = -1.0, 1.0
+    x = min(max(float(raw_score), lo), hi)
+    return max(0.0, min(100.0, (x - lo) / (hi - lo) * 100.0))
+
+
 class BehavioralMLAnalyzer:
     """
     Load trained Isolation Forest model and predict anomaly scores
@@ -101,11 +119,8 @@ class BehavioralMLAnalyzer:
             # Isolation Forest returns: -1 (anomaly) to 1 (normal)
             raw_score = self.model.decision_function(features_2d)[0]
             
-            # Convert to [0, 100] scale where higher = more anomalous
-            # Isolation Forest: -1 = anomaly, 1 = normal
-            # We want: 0 = normal, 100 = highly anomalous
-            # Formula: anomaly_score = (1 - raw_score) / 2 * 100
-            anomaly_score = max(0.0, min(100.0, (1 - raw_score) / 2 * 100))
+            # Calibrated to [0,100] with configured normalization policy.
+            anomaly_score = _normalize_anomaly_raw(raw_score)
             
             # Threshold: score > threshold is considered anomaly (configurable)
             from config import WorkerConfig

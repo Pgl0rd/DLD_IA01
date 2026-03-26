@@ -417,6 +417,10 @@ if True:
             self.max_head_bytes = int(max_head_bytes)
             self.hash_max_bytes = hash_max_bytes
             self.sample_max_chars = int(sample_max_chars)
+            # Keep sensor lightweight by default, but require hash field for user file ops when possible.
+            self.require_sha256_for_user_ops = os.getenv("FILE_SENSOR_REQUIRE_SHA256", "1").strip().lower() in {"1", "true", "yes", "on"}
+            self.hash_full_for_user_ops = os.getenv("FILE_SENSOR_HASH_FULL_FOR_USER_OPS", "0").strip().lower() in {"1", "true", "yes", "on"}
+            self._hash_cache: Dict[str, str] = {}
 
             self.agg_window_sec = float(agg_window_sec)
             self.bulk_count_window_sec = float(os.getenv("FILE_SENSOR_BULK_WINDOW_SEC", "10.0"))
@@ -534,6 +538,31 @@ if True:
             if self.include_exts is not None:
                 return _get_ext(path) not in self.include_exts
             return False
+
+        def _hash_cache_key(self, path: str, size: Optional[int], mtime: Optional[float]) -> Optional[str]:
+            if not path:
+                return None
+            if size is None or mtime is None:
+                return None
+            return f"{path.lower()}|{int(size)}|{float(mtime)}"
+
+        def _get_or_compute_sha256(
+            self,
+            path: str,
+            size: Optional[int],
+            mtime: Optional[float],
+            full_hash: bool = False,
+        ) -> Optional[str]:
+            key = self._hash_cache_key(path, size=size, mtime=mtime)
+            if key:
+                cached = self._hash_cache.get(key)
+                if cached:
+                    return cached
+            max_bytes = None if full_hash else self.hash_max_bytes
+            h = _file_sha256(path, max_bytes=max_bytes)
+            if h and key:
+                self._hash_cache[key] = h
+            return h
 
         def _mark_suppress_modified(self, path: Optional[str]) -> None:
             if not path:
@@ -843,8 +872,20 @@ if True:
             if exists and enrich_flags["need_zip_pw"]:
                 pw_protected = _zip_password_protected(target_for_content)
 
-            if exists and enrich_flags["need_hash"]:
-                hash_sha256 = _file_sha256(target_for_content, max_bytes=self.hash_max_bytes)
+            force_hash = bool(
+                self.require_sha256_for_user_ops
+                and op_type in {"file_copy", "file_copy_external", "file_move", "file_rename", "file_create", "file_modify"}
+            )
+            if exists and (enrich_flags["need_hash"] or force_hash):
+                hash_sha256 = self._get_or_compute_sha256(
+                    target_for_content,
+                    size=size,
+                    mtime=mtime,
+                    full_hash=bool(force_hash and self.hash_full_for_user_ops),
+                )
+            # Race condition fallback: preserve previous hash on rename/move when file is momentarily locked.
+            if (not hash_sha256) and op_type in {"file_move", "file_rename"} and before_hash:
+                hash_sha256 = before_hash
 
             if exists and enrich_flags["need_sample"]:
                 # Prefer text sample for textish files

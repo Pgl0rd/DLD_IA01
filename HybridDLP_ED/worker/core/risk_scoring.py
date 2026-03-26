@@ -12,6 +12,41 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
 
 
+def _clamp_0_100(v: float) -> float:
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(100.0, max(0.0, x))
+
+
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def normalize_anomaly_score(raw_value: Any) -> float:
+    """
+    Normalize anomaly signal to [0,100] using configurable policy.
+    - percentile: robust clipping with P5/P95
+    - minmax: linear map with min/max
+    """
+    x = _safe_float(raw_value, 0.0)
+    method = (WorkerConfig.ML_ANOMALY_NORM_METHOD or "percentile").lower()
+    if method == "minmax":
+        lo = WorkerConfig.ML_ANOMALY_MIN
+        hi = WorkerConfig.ML_ANOMALY_MAX
+    else:
+        lo = WorkerConfig.ML_ANOMALY_P5
+        hi = WorkerConfig.ML_ANOMALY_P95
+    if hi <= lo:
+        lo, hi = -1.0, 1.0
+    xc = min(max(x, lo), hi)
+    return _clamp_0_100(100.0 * (xc - lo) / (hi - lo))
+
+
 def classify_risk_level(total_score: float) -> str:
     """
     Ánh xạ điểm rủi ro tổng (0–100) sang mức: low | medium | high | critical.
@@ -24,6 +59,9 @@ def classify_risk_level(total_score: float) -> str:
     low_m = WorkerConfig.RISK_LEVEL_LOW_MAX
     med_m = WorkerConfig.RISK_LEVEL_MEDIUM_MAX
     high_m = WorkerConfig.RISK_LEVEL_HIGH_MAX
+    # Enforce monotonic bins to keep policy robust even if env is misconfigured.
+    if not (0 <= low_m < med_m < high_m <= 100):
+        low_m, med_m, high_m = 25.0, 50.0, 75.0
     if s < low_m:
         return "low"
     if s < med_m:
@@ -42,6 +80,15 @@ class RiskScoringEngine:
         self.method = WorkerConfig.RISK_SCORING_METHOD
         self.research_engine = ResearchBasedRiskScoringEngine() if self.method == 'research_based' else None
         self.nist_engine = NISTBasedRiskScoringEngine() if self.method == 'nist_based' else None
+        logger.info(
+            "Risk policy loaded: method=%s, composite=%s, alert_threshold=%s, risk_bins=(%s,%s,%s)",
+            self.method,
+            WorkerConfig.RISK_COMPOSITE_MODEL,
+            self.thresholds.get("alert"),
+            WorkerConfig.RISK_LEVEL_LOW_MAX,
+            WorkerConfig.RISK_LEVEL_MEDIUM_MAX,
+            WorkerConfig.RISK_LEVEL_HIGH_MAX,
+        )
     
     def calculate_score(self, 
                        fast_scan_result: Dict[str, Any],
@@ -93,25 +140,28 @@ class RiskScoringEngine:
         # Get event data from context if available (for IOC hits)
         event_data = event_context.get('_event_data', {})
         
-        # 1. Content Score (50%)
+        # 1) Content Score = Impact proxy (Sc in [0,100])
         content_score = self._calculate_content_score(
             fast_scan_result, 
             deep_analysis_result,
             event_data
         )
-        scores['content_score'] = content_score
+        scores['content_score'] = _clamp_0_100(content_score)
         details['content'] = {
             'yara_matches': len(fast_scan_result.get('yara_matches', [])),
             'encrypted_zip': fast_scan_result.get('is_encrypted_zip', False),
             'ml_sensitive': deep_analysis_result.get('is_sensitive', False)
         }
         
-        # 2. Behavior Score (30%) — gộp điểm anomaly UEBA/Isolation Forest (0–100) vào kênh hành vi
-        # S_behavior = min(100, S_behavior^0 + β · S_anomaly), β = ML_ANOMALY_BEHAVIOR_BLEND
+        # 2) Behavior Score (Sb): blend action risk + anomaly
+        # Sb = min(100, S_action + beta * S_anomaly)
         behavior_base = self._calculate_behavior_score(event_context)
-        ml_anomaly = float(event_context.get("ml_anomaly_score") or 0.0)
+        ml_anomaly = _safe_float(event_context.get("ml_anomaly_score"), 0.0)
+        if ml_anomaly <= 1.0 and _safe_float(deep_analysis_result.get("anomaly_score"), 0.0) != 0.0:
+            # Backward compat path for raw anomaly signals.
+            ml_anomaly = normalize_anomaly_score(deep_analysis_result.get("anomaly_score"))
         blend = WorkerConfig.ML_ANOMALY_BEHAVIOR_BLEND
-        behavior_score = min(100.0, behavior_base + ml_anomaly * blend)
+        behavior_score = _clamp_0_100(behavior_base + ml_anomaly * blend)
         scores['behavior_score'] = behavior_score
         details['behavior'] = {
             'action_type': event_context.get('action_type', 'unknown'),
@@ -121,23 +171,46 @@ class RiskScoringEngine:
             'ml_anomaly_behavior_blend': blend,
         }
         
-        # 3. Context Score (20%)
+        # 3) Context Score (Sx in [0,100])
         context_score = self._calculate_context_score(event_context)
-        scores['context_score'] = context_score
+        scores['context_score'] = _clamp_0_100(context_score)
         details['context'] = {
             'user': event_context.get('user', 'unknown'),
             'time': event_context.get('time', 'unknown'),
             'location': event_context.get('location', 'unknown')
         }
         
-        # Tính tổng điểm (weighted)
-        total_score = (
-            scores['content_score'] * self.weights['content'] +
-            scores['behavior_score'] * self.weights['behavior'] +
-            scores['context_score'] * self.weights['context']
-        )
+        # 4) Composite model: weighted sum OR NIST-like multiplicative
+        model = (WorkerConfig.RISK_COMPOSITE_MODEL or "nist_multiplicative").lower()
+        if model == "weighted_sum":
+            total_score = (
+                scores['content_score'] * self.weights['content'] +
+                scores['behavior_score'] * self.weights['behavior'] +
+                scores['context_score'] * self.weights['context']
+            )
+            details["composite_model"] = {
+                "name": "weighted_sum",
+                "weights": {
+                    "content": self.weights.get("content", 0.0),
+                    "behavior": self.weights.get("behavior", 0.0),
+                    "context": self.weights.get("context", 0.0),
+                },
+            }
+        else:
+            alpha = WorkerConfig.RISK_LIKELIHOOD_ALPHA
+            impact = scores["content_score"]
+            likelihood = _clamp_0_100(alpha * scores["behavior_score"] + (1.0 - alpha) * scores["context_score"])
+            total_score = (impact * likelihood) / 100.0
+            details["composite_model"] = {
+                "name": "nist_multiplicative",
+                "likelihood_alpha": alpha,
+                "impact": round(impact, 2),
+                "likelihood": round(likelihood, 2),
+                "formula": "risk=(impact*likelihood)/100",
+            }
         
         # Quyết định hành động
+        total_score = _clamp_0_100(total_score)
         action = self._determine_action(total_score)
         risk_level = classify_risk_level(total_score)
         
@@ -547,11 +620,12 @@ class ResearchBasedRiskScoringEngine:
         score = 0
         
         # ML Anomaly Score (if available from Isolation Forest or similar)
-        ml_anomaly = deep_analysis.get('anomaly_score')
-        if ml_anomaly is not None:
-            # Normalize from -1,1 to 0-1, then scale to 0-100
-            normalized_anomaly = (ml_anomaly + 1) / 2  # -1,1 -> 0,1
-            score += normalized_anomaly * 100
+        ml_anomaly = deep_analysis.get("ml_anomaly_score")
+        if ml_anomaly is None:
+            ml_anomaly = deep_analysis.get("anomaly_score")
+            score += normalize_anomaly_score(ml_anomaly)
+        else:
+            score += _clamp_0_100(ml_anomaly)
         
         # Anomaly Boost from indicators
         anomaly_boost = 0
@@ -835,7 +909,9 @@ class NISTBasedRiskScoringEngine:
         frequency_score = self._get_frequency_score(event_context)
         
         # UEBA ML Anomaly Score (0-100) -> normalize to 1-5 scale
-        ml_anomaly_score = event_context.get("ml_anomaly_score", 0.0)
+        ml_anomaly_score = _safe_float(event_context.get("ml_anomaly_score"), 0.0)
+        if ml_anomaly_score <= 1.0 and _safe_float(deep_analysis_result.get("anomaly_score"), 0.0) != 0.0:
+            ml_anomaly_score = normalize_anomaly_score(deep_analysis_result.get("anomaly_score"))
         ml_is_anomaly = event_context.get("ml_is_anomaly", False)
         ml_likelihood_boost = 0.0
         if ml_is_anomaly and ml_anomaly_score > 0:

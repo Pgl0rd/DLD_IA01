@@ -13,6 +13,22 @@ BASE_DIR = Path("/app") if Path("/app").exists() else _config_file.parent.parent
 AGENT_DIR = BASE_DIR / "agent"
 WORKER_DIR = BASE_DIR / "worker"
 
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _env_float_bounded(name: str, default: float, min_v: float, max_v: float) -> float:
+    v = _env_float(name, default)
+    if v < min_v:
+        return float(min_v)
+    if v > max_v:
+        return float(max_v)
+    return float(v)
+
 class WorkerConfig:
     """Configuration cho Detection Engine Worker"""
     
@@ -80,23 +96,39 @@ class WorkerConfig:
     RISK_THRESHOLDS = {
         # System requirement: alert-only (no blocking). Keep key for compatibility but make it unreachable.
         'block': 10**9,
-        'alert': 40,  # Lowered from 50 to 40 for more sensitive detection
+        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 40.0, 40.0, 70.0),
         'log': 0
     }
 
     # Phân loại mức độ rủi ro trên thang điểm tổng 0–100 (điều chỉnh được qua biến môi trường)
     # low: [0, low_max), medium: [low_max, medium_max), high: [medium_max, high_max), critical: [high_max, 100]
-    RISK_LEVEL_LOW_MAX = float(os.getenv("RISK_LEVEL_LOW_MAX", "25"))
-    RISK_LEVEL_MEDIUM_MAX = float(os.getenv("RISK_LEVEL_MEDIUM_MAX", "50"))
-    RISK_LEVEL_HIGH_MAX = float(os.getenv("RISK_LEVEL_HIGH_MAX", "75"))
+    RISK_LEVEL_LOW_MAX = _env_float_bounded("RISK_LEVEL_LOW_MAX", 25.0, 10.0, 40.0)
+    RISK_LEVEL_MEDIUM_MAX = _env_float_bounded("RISK_LEVEL_MEDIUM_MAX", 50.0, 30.0, 70.0)
+    RISK_LEVEL_HIGH_MAX = _env_float_bounded("RISK_LEVEL_HIGH_MAX", 75.0, 55.0, 95.0)
     
     # ML Anomaly Detection Thresholds
-    ML_ANOMALY_THRESHOLD = float(os.getenv('ML_ANOMALY_THRESHOLD', '70.0'))  # Score > 70 = anomaly (lowered from 75)
-    ML_ANOMALY_BOOST_THRESHOLD = float(os.getenv('ML_ANOMALY_BOOST_THRESHOLD', '70.0'))  # Threshold for likelihood boost
+    ML_ANOMALY_THRESHOLD = _env_float_bounded("ML_ANOMALY_THRESHOLD", 70.0, 40.0, 95.0)
+    ML_ANOMALY_BOOST_THRESHOLD = _env_float_bounded("ML_ANOMALY_BOOST_THRESHOLD", 70.0, 40.0, 95.0)
 
     # Phương pháp traditional: điểm anomaly UEBA (0–100) gộp vào Behavior score
     # S_behavior = min(100, S_behavior^0 + β * S_anomaly), β = ML_ANOMALY_BEHAVIOR_BLEND
-    ML_ANOMALY_BEHAVIOR_BLEND = float(os.getenv("ML_ANOMALY_BEHAVIOR_BLEND", "0.25"))
+    ML_ANOMALY_BEHAVIOR_BLEND = _env_float_bounded("ML_ANOMALY_BEHAVIOR_BLEND", 0.25, 0.0, 1.0)
+    ML_ANOMALY_RISK_BOOST_FACTOR = _env_float_bounded("ML_ANOMALY_RISK_BOOST_FACTOR", 0.0, 0.0, 1.0)
+
+    # Composite model for final risk:
+    # - "weighted_sum": R = wc*Sc + wb*Sb + wx*Sx
+    # - "nist_multiplicative": Impact=Sc, Likelihood=alpha*Sb + (1-alpha)*Sx, R=(Impact*Likelihood)/100
+    RISK_COMPOSITE_MODEL = os.getenv("RISK_COMPOSITE_MODEL", "nist_multiplicative").strip().lower()
+    RISK_LIKELIHOOD_ALPHA = _env_float_bounded("RISK_LIKELIHOOD_ALPHA", 0.6, 0.0, 1.0)
+
+    # Anomaly normalization policy for raw anomaly signal (if any):
+    # - "percentile": robust clipping with p5/p95 then map to [0,100]
+    # - "minmax": min-max map to [0,100]
+    ML_ANOMALY_NORM_METHOD = os.getenv("ML_ANOMALY_NORM_METHOD", "percentile").strip().lower()
+    ML_ANOMALY_P5 = _env_float("ML_ANOMALY_P5", -0.6)
+    ML_ANOMALY_P95 = _env_float("ML_ANOMALY_P95", 0.6)
+    ML_ANOMALY_MIN = _env_float("ML_ANOMALY_MIN", -1.0)
+    ML_ANOMALY_MAX = _env_float("ML_ANOMALY_MAX", 1.0)
     
     # Behavioral Risk Boost Values
     BEHAVIORAL_RISK_BOOST = {

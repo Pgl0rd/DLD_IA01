@@ -14,6 +14,21 @@ logger = logging.getLogger(__name__)
 from .feature_extractor import EventFeatureExtractor
 
 
+def _normalize_anomaly_raw(raw_score: float, worker_cfg) -> float:
+    method = getattr(worker_cfg, "ML_ANOMALY_NORM_METHOD", "percentile")
+    method = str(method or "percentile").lower()
+    if method == "minmax":
+        lo = float(getattr(worker_cfg, "ML_ANOMALY_MIN", -1.0))
+        hi = float(getattr(worker_cfg, "ML_ANOMALY_MAX", 1.0))
+    else:
+        lo = float(getattr(worker_cfg, "ML_ANOMALY_P5", -0.6))
+        hi = float(getattr(worker_cfg, "ML_ANOMALY_P95", 0.6))
+    if hi <= lo:
+        lo, hi = -1.0, 1.0
+    x = min(max(float(raw_score), lo), hi)
+    return max(0.0, min(100.0, (x - lo) / (hi - lo) * 100.0))
+
+
 class BehavioralMLAnalyzer:
     """
     Load trained Isolation Forest model và predict anomaly scores
@@ -106,25 +121,26 @@ class BehavioralMLAnalyzer:
             # Isolation Forest returns: -1 (anomaly) to 1 (normal)
             raw_score = self.model.decision_function(features_2d)[0]
             
-            # Convert to [0, 100] scale where higher = more anomalous
-            # Isolation Forest: -1 = anomaly, 1 = normal
-            # We want: 0 = normal, 100 = highly anomalous
-            # Formula: anomaly_score = (1 - raw_score) / 2 * 100
-            base_anomaly_score = max(0.0, min(100.0, (1 - raw_score) / 2 * 100))
+            try:
+                from worker.config import WorkerConfig
+            except Exception:
+                WorkerConfig = None
+
+            if WorkerConfig is not None:
+                base_anomaly_score = _normalize_anomaly_raw(raw_score, WorkerConfig)
+                boost_factor = float(getattr(WorkerConfig, "ML_ANOMALY_RISK_BOOST_FACTOR", 0.0))
+                threshold = float(getattr(WorkerConfig, "ML_ANOMALY_THRESHOLD", 70.0))
+            else:
+                base_anomaly_score = max(0.0, min(100.0, (1 - raw_score) / 2 * 100))
+                boost_factor = 0.0
+                threshold = 75.0
             
             # Apply risk boost for high-risk cases (ChatGPT, USB, etc.)
-            risk_boost = self._calculate_risk_boost(features_2d[0])
+            risk_boost = self._calculate_risk_boost(features_2d[0]) * max(0.0, min(1.0, boost_factor))
             anomaly_score = min(100.0, base_anomaly_score + risk_boost)
             
             # Threshold: score > threshold is considered anomaly (configurable)
             # Default threshold: 75 (có thể config trong config.py)
-            threshold = 75.0  # Default, có thể override từ config
-            try:
-                from worker.config import WorkerConfig
-                threshold = WorkerConfig.ML_ANOMALY_THRESHOLD
-            except:
-                pass
-            
             is_anomaly = anomaly_score > threshold
             
             return {
