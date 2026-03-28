@@ -6,6 +6,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from collections import deque
 from ctypes import wintypes
 from typing import Any, Deque, Dict, List, Optional, Set, Tuple
@@ -1027,6 +1028,7 @@ class ClipboardSensor:
             "ioc_hits": snap.get("ioc_hits") or [],
             "clipboard": {
                 "event_type": event_type,
+                "clipboard_id": str(uuid.uuid4()),
                 "copy_ts": snap.get("copy_ts"),
                 "paste_ts": None,
                 "content_hash": snap.get("content_hash"),

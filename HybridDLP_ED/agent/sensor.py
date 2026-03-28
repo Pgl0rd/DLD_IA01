@@ -644,6 +644,7 @@ def main() -> None:
     qm_monitor = QueueMonitor(queue_manager=qm, state_dir=STATE_DIR, check_interval_sec=1.0)
 
     # Kiến trúc 2 tầng: Sensor chỉ enqueue nhẹ; correlator mặc định OFF (Worker xử lý).
+    # Chuỗi clipboard → USB (agent.sensors.clipboard_usb_matcher) chạy trong ContextCorrelator: bật SENSOR_ENABLE_CORRELATOR=1.
     correlator: Optional[ContextCorrelator] = None
     if os.getenv("SENSOR_ENABLE_CORRELATOR", "0").strip().lower() in {"1", "true", "yes", "on"}:
         correlator = ContextCorrelator(debug=True)

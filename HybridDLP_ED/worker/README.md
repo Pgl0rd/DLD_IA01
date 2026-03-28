@@ -111,7 +111,7 @@ Các tham số có thể điều chỉnh:
 - `OCR_MAX_CPU_PERCENT`: CPU usage tối đa cho OCR (default: 70%)
 - `RISK_THRESHOLDS`: Ngưỡng risk score cho block/alert/log
 - `RISK_WEIGHTS`: Trọng số cho content/behavior/context scores (phương pháp `traditional`)
-- `RISK_SCORING_METHOD`: `traditional` | `nist_based` | `research_based`
+- `RISK_SCORING_METHOD`: mặc định `cvss_dlp` (Base + Exfiltration Maturity + Environmental + fusion); có thể `nist_based` | `traditional` | `research_based`
 - `ML_ANOMALY_BEHAVIOR_BLEND`: Hệ số gộp điểm anomaly UEBA (0–100) vào Behavior score (traditional)
 - `RISK_LEVEL_LOW_MAX`, `RISK_LEVEL_MEDIUM_MAX`, `RISK_LEVEL_HIGH_MAX`: Ranh giới phân loại low/medium/high/critical
 
@@ -139,7 +139,7 @@ Worker có thể được spawn bởi Agent Service hoặc chạy độc lập.
 6. **Deep Analysis** (nếu cần):
    - OCR (với điều kiện: size < 5MB, CPU < 70%, là ảnh)
    - ML Classification (lazy load)
-7. **Risk Scoring**: Theo `RISK_SCORING_METHOD` — traditional (trọng số Content/Behavior/Context + blend UEBA vào Behavior), NIST (L×I), hoặc research-based; kết quả có `risk_level` (low/medium/high/critical)
+7. **Risk Scoring**: Theo `RISK_SCORING_METHOD` — mặc định **cvss_dlp** (CVSS-inspired: base, maturity U/P/A/X, environmental, attack chain, fusion); hoặc NIST (L×I), traditional, research-based; kết quả có `risk_level` (low/medium/high/critical)
 8. **Action Executor**: Thực thi Block/Alert/Log
 9. **Update Cache**: Lưu kết quả vào cache
 

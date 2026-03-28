@@ -187,8 +187,8 @@ class WorkerConfig:
         'impact_max': 4.0        # Max I on 1–4 scale (Public→Secret)
     }
     
-    # Risk Scoring Method: 'traditional', 'research_based', 'nist_based', hoặc 'cvss_dlp' (Noteupdate.txt)
-    RISK_SCORING_METHOD = os.getenv('RISK_SCORING_METHOD', 'nist_based').strip().lower()
+    # Risk Scoring Method: mặc định 'cvss_dlp' (Noteupdate); có thể đổi: nist_based, traditional, research_based
+    RISK_SCORING_METHOD = os.getenv('RISK_SCORING_METHOD', 'cvss_dlp').strip().lower()
 
     # --- CVSS-inspired DLP (Noteupdate.txt §3–§4) ---
     CVSS_DLP_BASE_WEIGHTS = {

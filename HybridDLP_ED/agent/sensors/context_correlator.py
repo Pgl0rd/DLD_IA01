@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from agent.event_schema import normalize_event
+from agent.sensors.clipboard_usb_matcher import ClipboardUsbMatcher
 
 __all__ = ["ContextCorrelator"]
 
@@ -528,6 +529,7 @@ class ContextCorrelator:
         self._network_recent: Deque[Dict[str, Any]] = deque()
         self._clipboard_recent: Deque[Dict[str, Any]] = deque()
         self._recent_corr_keys: Deque[Tuple[float, str]] = deque()
+        self._clipboard_usb = ClipboardUsbMatcher(dedupe_fn=lambda k, t: self._dedupe_ok(k, t))
 
     def _dbg(self, *args) -> None:
         if self.debug:
@@ -966,6 +968,10 @@ class ContextCorrelator:
                 }
                 self._clipboard_recent.append(clip_evt)
                 self._hard_cap(self._clipboard_recent)
+                try:
+                    self._clipboard_usb.record_clipboard_copy(evt, now_unix)
+                except Exception:
+                    pass
 
             if etype in (
                 "net_flow_violation",
@@ -1234,6 +1240,40 @@ class ContextCorrelator:
                                 }
                                 out.append(self._make_corr(corr_raw, now_unix))
                             break
+
+                vt_usb = _evt_dest_volume_type(evt)
+                if candidate and vt_usb and "removable" in vt_usb:
+                    if etype in (
+                        "file_created",
+                        "file_modified",
+                        "file_moved",
+                        "file_copied",
+                        "file_renamed",
+                    ) or op_type in (
+                        "file_create",
+                        "file_modify",
+                        "file_move",
+                        "file_copy",
+                        "file_rename",
+                        "file_copy_external",
+                        "file_move_external",
+                    ):
+                        try:
+                            for cr in self._clipboard_usb.correlate_file_on_removable(
+                                evt,
+                                now_unix,
+                                path=candidate,
+                                volume_type=vt_usb,
+                                etype=etype,
+                                op_type=op_type,
+                                build_actor=self._build_actor,
+                                build_context=self._build_context,
+                                iso_from_ts=_iso_from_ts,
+                                sev_fn=_sev,
+                            ):
+                                out.append(self._make_corr(cr, now_unix))
+                        except Exception:
+                            pass
 
             if etype in ("clipboard_text", "clipboard_copy", "clipboard_paste"):
                 ctx = _evt_context(evt)

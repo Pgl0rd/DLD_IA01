@@ -248,6 +248,7 @@ def empty_event() -> Dict[str, Any]:
         # L1 buckets
         # =========
         "clipboard": {
+            "clipboard_id": None,
             "event_type": None,
             "copy_ts": None,
             "paste_ts": None,
