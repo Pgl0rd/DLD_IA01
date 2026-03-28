@@ -169,7 +169,16 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
         "cmdline": actor0.get("cmdline") or legacy_proc.get("cmdline") or ctx.get("fg_cmdline"),
     }
 
-    operation = _derive_operation(etype, source, evt)
+    derived_op = _derive_operation(etype, source, evt)
+    op_sensor = evt.get("operation") if isinstance(evt.get("operation"), dict) else {}
+    operation = dict(derived_op)
+    for k, v in op_sensor.items():
+        if v is not None:
+            operation[k] = v
+    if not operation.get("op_type"):
+        operation["op_type"] = derived_op.get("op_type")
+    if operation.get("tool") is None:
+        operation["tool"] = derived_op.get("tool")
 
     legacy_file = evt.get("file") if isinstance(evt.get("file"), dict) else {}
     obj0 = evt.get("object") if isinstance(evt.get("object"), dict) else {}
@@ -195,6 +204,8 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
         "new_ext": evt.get("new_ext") or legacy_file.get("new_ext") or obj0.get("new_ext") or evt.get("New_Extension"),
         "signature": evt.get("signature") or legacy_file.get("signature") or obj0.get("signature") or evt.get("File_Signature"),
         "hash_sha256": evt.get("hash_sha256") or legacy_file.get("hash_sha256") or obj0.get("hash_sha256") or evt.get("File_Hash"),
+        "hash_sha256_partial": obj0.get("hash_sha256_partial") or evt.get("File_Hash_Partial"),
+        "hash_sha256_full": obj0.get("hash_sha256_full") or evt.get("File_Hash_Full"),
 
         "format": obj0.get("format"),
         "text_len": obj0.get("text_len") or evt.get("text_len"),

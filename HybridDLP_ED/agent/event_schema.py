@@ -153,6 +153,9 @@ def empty_event() -> Dict[str, Any]:
             "tool": None,
             "service_name": None,
             "service_category": None,
+            # file_sensor: copy vs move to external (Removable/Network) from fixed-disk evidence
+            "copy_move_verdict": None,
+            "copy_move_evidence": None,
         },
 
         "object": {
@@ -177,6 +180,8 @@ def empty_event() -> Dict[str, Any]:
             "new_ext": None,
             "signature": None,
             "hash_sha256": None,
+            "hash_sha256_partial": None,
+            "hash_sha256_full": None,
 
             # clipboard/file/process friendly optional extras
             "format": None,
@@ -189,6 +194,7 @@ def empty_event() -> Dict[str, Any]:
             "bytes": None,
             "dest": None,
             "dest_display": None,
+            "metadata": {},
         },
 
         "context": {
@@ -482,13 +488,12 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "parent_cmdline": process.get("parent_cmdline"),
     })
 
-    # operation
-    e["operation"].update({
-        "op_type": first_non_empty(operation.get("op_type"), raw.get("type")),
-        "tool": operation.get("tool"),
-        "service_name": operation.get("service_name"),
-        "service_category": operation.get("service_category"),
-    })
+    # operation — preservar todas as chaves não nulas do sensor (hash_kind, correlation, …)
+    op_patch = {k: v for k, v in operation.items() if v is not None}
+    op_patch.setdefault("op_type", first_non_empty(operation.get("op_type"), raw.get("type")))
+    if op_patch.get("tool") is None:
+        op_patch["tool"] = operation.get("tool")
+    e["operation"].update(op_patch)
 
     # object
     e["object"].update({
@@ -512,6 +517,8 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "new_ext": first_non_empty(obj.get("new_ext"), raw.get("new_ext"), raw.get("New_Extension")),
         "signature": first_non_empty(obj.get("signature"), raw.get("signature"), raw.get("File_Signature")),
         "hash_sha256": first_non_empty(obj.get("hash_sha256"), raw.get("hash_sha256"), raw.get("File_Hash")),
+        "hash_sha256_partial": first_non_empty(obj.get("hash_sha256_partial"), raw.get("File_Hash_Partial")),
+        "hash_sha256_full": first_non_empty(obj.get("hash_sha256_full"), raw.get("File_Hash_Full")),
 
         "format": obj.get("format"),
         "text_len": first_non_empty(obj.get("text_len"), clipboard.get("text_len"), clipboard.get("content_len")),
@@ -524,6 +531,10 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "dest": first_non_empty(obj.get("dest"), raw.get("dest")),
         "dest_display": first_non_empty(obj.get("dest_display"), raw.get("dest_display")),
     })
+    if isinstance(obj.get("metadata"), dict):
+        meta = {k: v for k, v in obj["metadata"].items() if v is not None}
+        if meta:
+            e["object"]["metadata"] = meta
 
     # context
     e["context"].update({
@@ -737,5 +748,12 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
     ok, err = validate_event(e)
     if not ok:
         e["debug"]["schema_error"] = err
+
+    try:
+        from agent.canonical_compact import finalize_storage_event
+
+        e = finalize_storage_event(e)
+    except Exception:
+        pass
 
     return e

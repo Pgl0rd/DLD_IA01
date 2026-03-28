@@ -7,7 +7,7 @@ if True:
     import hashlib
     from dataclasses import dataclass
     from pathlib import Path
-    from typing import Any, Dict, List, Optional, Tuple
+    from typing import Any, Dict, List, Optional, Set, Tuple
     from collections import deque
 
     # Optional (better rename/move support)
@@ -142,7 +142,9 @@ if True:
             return None, None
 
 
-    def _file_sha256(path: str, max_bytes: Optional[int] = None) -> Optional[str]:
+    def _file_sha256_ex(path: str, max_bytes: Optional[int] = None) -> Tuple[Optional[str], Optional[int]]:
+        """Return (hex_digest, bytes_read). bytes_read is None on total failure."""
+        bytes_read = 0
         try:
             h = hashlib.sha256()
             with open(path, "rb") as f:
@@ -152,6 +154,7 @@ if True:
                         if not chunk:
                             break
                         h.update(chunk)
+                        bytes_read += len(chunk)
                 else:
                     remaining = int(max_bytes)
                     while remaining > 0:
@@ -159,10 +162,49 @@ if True:
                         if not chunk:
                             break
                         h.update(chunk)
-                        remaining -= len(chunk)
-            return h.hexdigest()
+                        n = len(chunk)
+                        bytes_read += n
+                        remaining -= n
+            return h.hexdigest(), int(bytes_read)
         except Exception:
-            return None
+            return None, None
+
+
+    @dataclass
+    class _HashResult:
+        """Single hash computation outcome for DLP semantics (partial vs full, provenance)."""
+
+        value: Optional[str]
+        kind: str  # partial | full | none | unknown
+        source: str  # fresh_read | path_cache | fallback_previous_meta | fresh_read_failed
+        bytes_read: Optional[int]
+
+        def to_dict(self) -> Dict[str, Any]:
+            return {
+                "value": self.value,
+                "kind": self.kind,
+                "source": self.source,
+                "bytes_read": self.bytes_read,
+            }
+
+        @staticmethod
+        def from_dict(d: Dict[str, Any], source_override: Optional[str] = None) -> "_HashResult":
+            return _HashResult(
+                d.get("value"),
+                str(d.get("kind") or "none"),
+                str(source_override or d.get("source") or "unknown"),
+                d.get("bytes_read"),
+            )
+
+
+    def _fingerprint_cache_key(
+        size: Optional[int],
+        digest: str,
+        signature: Optional[str],
+    ) -> str:
+        sz = int(size) if size is not None else -1
+        sig = (signature or "").strip().lower()
+        return f"{sz}|{digest}|{sig}"
 
 
     def _object_id(path: str, size: Optional[int], mtime: Optional[float]) -> str:
@@ -180,6 +222,14 @@ if True:
             return hashlib.sha256(f"h|{file_hash}".encode("utf-8", errors="ignore")).hexdigest()[:24]
         fp = f"{size if size is not None else 'na'}|{mtime if mtime is not None else 'na'}"
         return hashlib.sha256(f"fp|{fp}|{path.lower()}".encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
+    def _object_identity_strength(hash_kind: str, has_hash: bool) -> str:
+        if has_hash and hash_kind == "full":
+            return "strong_content"
+        if has_hash:
+            return "probabilistic_content"
+        return "path_fingerprint"
 
 
     def _signature_from_magic(head: bytes, ext: str = "") -> Optional[str]:
@@ -272,6 +322,21 @@ if True:
             return None
 
 
+    def _parse_demo_usb_drive_letters() -> Set[str]:
+        """Letters (e.g. D) from FILE_SENSOR_DEMO_USB_DRIVES; default env value is ``D``."""
+        raw = os.getenv("FILE_SENSOR_DEMO_USB_DRIVES", "D").strip()
+        if raw.lower() in {"", "none", "off", "-"}:
+            return set()
+        out: Set[str] = set()
+        for part in raw.replace(",", ";").split(";"):
+            p = part.strip().upper()
+            if len(p) == 1 and p.isalpha():
+                out.add(p)
+            elif len(p) >= 2 and p[1] == ":":
+                out.add(p[0])
+        return out
+
+
     def _is_same_parent(a: str, b: str) -> bool:
         try:
             return Path(a).parent == Path(b).parent
@@ -314,6 +379,7 @@ if True:
         src_volume_type: Optional[str],
         dest_volume_type: Optional[str],
         correlation_action: Optional[str] = None,
+        external_create_semantic: Optional[str] = None,
     ) -> str:
         if correlation_action == "move_to_external":
             return "file_move_external"
@@ -338,6 +404,10 @@ if True:
             return "file_move"
 
         if evt_kind == "created":
+            if external_create_semantic == "move_to_removable":
+                return "file_move_external"
+            if external_create_semantic == "copy_to_removable":
+                return "file_copy_external"
             vt = dest_volume_type or src_volume_type
             if vt in {"Removable", "Network"}:
                 return "file_copy_external"
@@ -375,6 +445,7 @@ if True:
         overwrite: bool = False,
         effective_volume_type: Optional[str] = None,
         correlation_action: Optional[str] = None,
+        external_create_semantic: Optional[str] = None,
     ) -> str:
         if correlation_action == "move_to_external":
             return "MoveExternal"
@@ -392,6 +463,12 @@ if True:
             return "Move"
 
         if evt_kind == "created":
+            if external_create_semantic == "move_to_removable":
+                return "MoveExternal"
+            if external_create_semantic == "copy_to_removable":
+                return "CopyExternal"
+            if external_create_semantic == "unknown_external_create":
+                return "CopyExternal"
             if effective_volume_type in {"Removable", "Network"} or _is_cloud_path(dst_path or src_path):
                 return "Copy"
             return "Create"
@@ -401,6 +478,22 @@ if True:
         if evt_kind == "deleted":
             return "Delete"
         return "Modify"
+
+
+    def _looks_like_leaked_browser_domain(value: str) -> bool:
+        """Foreground URL/domain hints that should not drive file/USB conclusions."""
+        s = (value or "").strip().lower()
+        if not s:
+            return False
+        if "drive.google.com" in s or s.endswith(".google.com") or "docs.google.com" in s:
+            return True
+        if "sharepoint.com" in s or "onedrive" in s:
+            return True
+        if "dropbox.com" in s:
+            return True
+        if "box.com" in s:
+            return True
+        return False
 
 
     def _classify_sensitivity(ext: str, signature: Optional[str], path: str) -> str:
@@ -495,7 +588,16 @@ if True:
             # Keep sensor lightweight by default, but require hash field for user file ops when possible.
             self.require_sha256_for_user_ops = os.getenv("FILE_SENSOR_REQUIRE_SHA256", "1").strip().lower() in {"1", "true", "yes", "on"}
             self.hash_full_for_user_ops = os.getenv("FILE_SENSOR_HASH_FULL_FOR_USER_OPS", "0").strip().lower() in {"1", "true", "yes", "on"}
-            self._hash_cache: Dict[str, str] = {}
+            self.full_hash_on_external = os.getenv("FILE_SENSOR_FULL_HASH_ON_EXTERNAL", "0").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            # path|size|mtime → last _HashResult dict (L1 path-state cache)
+            self._hash_cache: Dict[str, Dict[str, Any]] = {}
+            # size|digest|signature → same dict (hint for L2 correlation; optional reuse guarded by env)
+            self._content_fp_cache: Dict[str, Dict[str, Any]] = {}
 
             self.agg_window_sec = float(agg_window_sec)
             self.bulk_count_window_sec = float(os.getenv("FILE_SENSOR_BULK_WINDOW_SEC", "10.0"))
@@ -516,6 +618,26 @@ if True:
                 for p in _default_screenshot_watch_paths():
                     self.add_watch_path(p)
 
+            # Demo: treat chosen letters as Removable (USB) and watch their roots (default D: on Windows).
+            self._demo_usb_enabled = os.name == "nt" and os.getenv("FILE_SENSOR_DEMO_USB", "1").strip().lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            self._demo_usb_letters: Set[str] = set()
+            if self._demo_usb_enabled:
+                self._demo_usb_letters = _parse_demo_usb_drive_letters()
+                if not self._demo_usb_letters:
+                    self._demo_usb_letters = {"D"}
+                for letter in sorted(self._demo_usb_letters):
+                    root = f"{letter}:\\"
+                    try:
+                        if os.path.exists(root):
+                            self.add_watch_path(root)
+                    except Exception:
+                        pass
+
             self._snap: Dict[str, _StatLite] = {}
             self._last_meta: Dict[str, Dict[str, Any]] = {}
 
@@ -530,6 +652,11 @@ if True:
             self._correlation_engine = (
                 FileCorrelationEngine(cw) if (cw > 0 and FileCorrelationEngine is not None) else None
             )
+
+            self._fixed_candidate_ttl_sec = float(os.getenv("FILE_SENSOR_FIXED_CANDIDATE_TTL_SEC", "120"))
+            self._usb_semantic_window_sec = float(os.getenv("FILE_SENSOR_USB_SEMANTIC_WINDOW_SEC", "30"))
+            self._fixed_content_candidates: deque = deque(maxlen=800)
+            self._fixed_deleted_recent: deque = deque(maxlen=400)
 
             if os.name == "nt" and VolumeWatchManager is not None and os.getenv(
                 "FILE_SENSOR_VOLUME_WATCH", "1"
@@ -738,6 +865,149 @@ if True:
         def _should_ignore(self, path: str) -> bool:
             return self._ignore_level(path) == "hard"
 
+        def _volume_type_effective(self, drive: Optional[str]) -> Optional[str]:
+            """Windows GetDriveType, unless drive letter is in demo USB list → Removable."""
+            if drive and len(drive) >= 2 and drive[1] == ":":
+                letter = drive[0].upper()
+                if letter in self._demo_usb_letters:
+                    return "Removable"
+            return _volume_type_windows(drive)
+
+        def _prune_fixed_buffers(self, now: float) -> None:
+            ttl = max(1.0, self._fixed_candidate_ttl_sec)
+            while self._fixed_content_candidates and (now - self._fixed_content_candidates[0]["ts"]) > ttl:
+                self._fixed_content_candidates.popleft()
+            while self._fixed_deleted_recent and (now - self._fixed_deleted_recent[0]["ts"]) > ttl:
+                self._fixed_deleted_recent.popleft()
+
+        def _remember_fixed_delete(
+            self,
+            ts: float,
+            path: str,
+            size: Optional[int],
+            file_hash: Optional[str],
+        ) -> None:
+            if not file_hash or size is None:
+                return
+            self._prune_fixed_buffers(ts)
+            self._fixed_deleted_recent.append(
+                {"ts": ts, "path": path, "size": int(size), "hash": file_hash}
+            )
+
+        def _remember_fixed_file_observation(
+            self,
+            ts: float,
+            path: str,
+            size: int,
+            file_hash: str,
+            pid: Any,
+            process: Any,
+        ) -> None:
+            d = _maybe_drive_letter(path)
+            if self._volume_type_effective(d) != "Fixed":
+                return
+            self._prune_fixed_buffers(ts)
+            self._fixed_content_candidates.append(
+                {
+                    "ts": ts,
+                    "path": path,
+                    "size": int(size),
+                    "hash": file_hash,
+                    "pid": pid,
+                    "process": process,
+                }
+            )
+
+        def _infer_external_create_semantic(
+            self,
+            dest_path: str,
+            dest_size: int,
+            dest_hash: str,
+            ts: float,
+            ctx: Dict[str, Any],
+        ) -> Tuple[str, Optional[str], Dict[str, Any]]:
+            """
+            Infer copy vs move onto Removable/Network when only a destination create is flushed.
+            Uses recent Fixed deletes (hash+size) and Fixed file observations (hash+size + path exists).
+
+            Rule flow (L1, evidence-based; D = external dest, C = fixed internal path):
+            - Create on D + hash matches a recent delete on C (same hash+size, within window)
+              -> move_strong (source disappeared: delete event).
+            - Create on D + hash matches a recent observation on C + reconcile shows path gone
+              -> move_likely.
+            - Create on D + hash matches observation on C + path still exists
+              -> copy_not_move.
+            - Create on D but no correlation to recent fixed-disk hash+size state
+              -> copy_or_move_candidate (ambiguous; not enough to prove move from C).
+            """
+            detail: Dict[str, Any] = {}
+            win = max(0.5, self._usb_semantic_window_sec)
+            self._prune_fixed_buffers(ts)
+
+            for rec in reversed(self._fixed_deleted_recent):
+                if ts - rec["ts"] > win:
+                    continue
+                if rec.get("hash") == dest_hash and rec.get("size") == dest_size:
+                    detail["match"] = "fixed_delete_hash_size"
+                    detail["matched_ts_delta_sec"] = round(ts - rec["ts"], 4)
+                    detail["copy_move_verdict"] = "move_strong"
+                    detail["copy_move_evidence"] = "source_delete_hash_size_in_window"
+                    detail["inferred_source_path"] = rec.get("path")
+                    return "move_to_removable", rec.get("path"), detail
+
+            best: Optional[Dict[str, Any]] = None
+            for rec in reversed(self._fixed_content_candidates):
+                if ts - rec["ts"] > win:
+                    continue
+                if rec.get("hash") != dest_hash or rec.get("size") != dest_size:
+                    continue
+                if best is None or rec["ts"] > best["ts"]:
+                    best = rec
+
+            if best is None:
+                detail["match"] = "none"
+                detail["copy_move_verdict"] = "copy_or_move_candidate"
+                detail["copy_move_evidence"] = "no_fixed_disk_hash_size_correlation"
+                return "unknown_external_create", None, detail
+
+            src_path = str(best["path"])
+            detail["match"] = "fixed_candidate_hash_size"
+            detail["matched_ts_delta_sec"] = round(ts - best["ts"], 4)
+            detail["inferred_source_path"] = src_path
+            try:
+                still = bool(os.path.exists(src_path))
+            except Exception:
+                still = True
+            detail["source_still_exists"] = still
+            if still:
+                detail["copy_move_verdict"] = "copy_not_move"
+                detail["copy_move_evidence"] = "reconcile_source_path_still_exists"
+                return "copy_to_removable", src_path, detail
+            detail["copy_move_verdict"] = "move_likely"
+            detail["copy_move_evidence"] = "reconcile_source_path_missing"
+            return "move_to_removable", src_path, detail
+
+        def _sanitize_ctx_for_file_external(
+            self,
+            ctx: Dict[str, Any],
+            dest_volume_type: Optional[str],
+            evt_kind: str,
+        ) -> Dict[str, Any]:
+            if evt_kind not in {"created", "modified", "moved"}:
+                return ctx
+            if dest_volume_type not in {"Removable", "Network"}:
+                return ctx
+            out = dict(ctx)
+            suppressed = False
+            for k in ("fg_domain", "dest_domain", "domain", "resolved_domain", "fg_url_hint"):
+                v = out.get(k)
+                if v and _looks_like_leaked_browser_domain(str(v)):
+                    out[k] = None
+                    suppressed = True
+            if suppressed:
+                out["file_context_domain_suppressed"] = True
+            return out
+
         def _ingest_fs_event(
             self,
             evt_kind: str,
@@ -758,8 +1028,12 @@ if True:
 
             src_drive = _maybe_drive_letter(p)
             dst_drive = _maybe_drive_letter(dp) if dp else None
-            src_vol = _volume_type_windows(src_drive)
-            dst_vol = _volume_type_windows(dst_drive) if dp else None
+            src_vol = self._volume_type_effective(src_drive)
+            dst_vol = self._volume_type_effective(dst_drive) if dp else None
+
+            if evt_kind == "deleted" and src_vol == "Fixed":
+                meta = self._last_meta.get(p) or {}
+                self._remember_fixed_delete(_now(), p, meta.get("size"), meta.get("hash"))
 
             size_hint: Optional[int] = None
             if evt_kind == "deleted":
@@ -817,23 +1091,34 @@ if True:
                 return None
             return f"{path.lower()}|{int(size)}|{float(mtime)}"
 
-        def _get_or_compute_sha256(
+        def _resolve_file_hash(
             self,
             path: str,
             size: Optional[int],
             mtime: Optional[float],
-            full_hash: bool = False,
-        ) -> Optional[str]:
+            want_full: bool,
+            signature: Optional[str],
+        ) -> "_HashResult":
+            """
+            Tier 1: path|size|mtime cache. Then disk read; tier 2 registers size|digest|signature for L2 correlation.
+            """
             key = self._hash_cache_key(path, size=size, mtime=mtime)
             if key:
                 cached = self._hash_cache.get(key)
                 if cached:
-                    return cached
-            max_bytes = None if full_hash else self.hash_max_bytes
-            h = _file_sha256(path, max_bytes=max_bytes)
-            if h and key:
-                self._hash_cache[key] = h
-            return h
+                    return _HashResult.from_dict(cached, source_override="path_cache")
+            max_bytes = None if want_full else self.hash_max_bytes
+            digest, bread = _file_sha256_ex(path, max_bytes=max_bytes)
+            if digest is None:
+                return _HashResult(None, "none", "fresh_read_failed", bread)
+            kind: str = "full" if want_full or max_bytes is None else "partial"
+            res = _HashResult(digest, kind, "fresh_read", bread)
+            if key:
+                self._hash_cache[key] = res.to_dict()
+            fpk = _fingerprint_cache_key(size, digest, signature)
+            if fpk:
+                self._content_fp_cache[fpk] = res.to_dict()
+            return res
 
         def _mark_suppress_modified(self, path: Optional[str]) -> None:
             if not path:
@@ -1090,26 +1375,24 @@ if True:
             target_for_content = dp or p
 
             src_drive = _maybe_drive_letter(p)
-            src_volume_type = _volume_type_windows(src_drive)
+            src_volume_type = self._volume_type_effective(src_drive)
 
             dest_drive = _maybe_drive_letter(dp) if dp else _maybe_drive_letter(target_for_content)
-            dest_volume_type = _volume_type_windows(dest_drive) if dest_drive else None
+            dest_volume_type = self._volume_type_effective(dest_drive) if dest_drive else None
 
             effective_drive = dest_drive or src_drive
             effective_volume_type = dest_volume_type or src_volume_type
 
-            op_type = _infer_op_type_v2(
-                evt_kind, p, dp, src_volume_type, dest_volume_type, correlation_action
-            )
-            report_event_type = _infer_report_event_type(evt_kind, p, dp)
-            report_op_type = _infer_operation_type(
+            prelim_op_type = _infer_op_type_v2(
                 evt_kind,
                 p,
                 dp,
-                overwrite=(evt_kind == "modified"),
-                effective_volume_type=effective_volume_type,
-                correlation_action=correlation_action,
+                src_volume_type,
+                dest_volume_type,
+                correlation_action,
+                None,
             )
+            report_event_type = _infer_report_event_type(evt_kind, p, dp)
             event_type = "file_renamed" if report_event_type == "Rename" else f"file_{evt_kind}"
 
             old_ext = None
@@ -1117,11 +1400,11 @@ if True:
             src_ext = _get_ext(p)
             target_ext = _get_ext(target_for_content)
 
-            if op_type in {"file_move", "file_rename", "file_move_external"} and dp:
+            if prelim_op_type in {"file_move", "file_rename", "file_move_external"} and dp:
                 old_ext = _get_ext(p)
                 new_ext = _get_ext(dp)
 
-            enrich_flags = _should_enrich(p, dp, target_ext, effective_volume_type, op_type)
+            enrich_flags = _should_enrich(p, dp, target_ext, effective_volume_type, prelim_op_type)
 
             if evt_kind == "deleted":
                 size = None
@@ -1134,7 +1417,6 @@ if True:
                 exists = bool(stx["exists"])
 
             signature = None
-            hash_sha256 = None
             entropy = None
             pw_protected = None
             sample = None
@@ -1161,7 +1443,7 @@ if True:
 
             force_hash = bool(
                 self.require_sha256_for_user_ops
-                and op_type
+                and prelim_op_type
                 in {
                     "file_copy",
                     "file_copy_external",
@@ -1172,16 +1454,118 @@ if True:
                     "file_modify",
                 }
             )
+            external_like = bool(
+                effective_volume_type in {"Removable", "Network"}
+                or prelim_op_type in {"file_copy_external", "file_move_external"}
+                or (dp and _is_cloud_path(dp))
+                or _is_cloud_path(target_for_content)
+            )
+            want_full = bool(
+                exists
+                and (
+                    (force_hash and self.hash_full_for_user_ops)
+                    or (self.full_hash_on_external and external_like)
+                )
+            )
+
+            hash_res = _HashResult(None, "none", "none", None)
+            hash_sha256_partial: Optional[str] = None
+            hash_sha256_full: Optional[str] = None
+
             if exists and (enrich_flags["need_hash"] or force_hash):
-                hash_sha256 = self._get_or_compute_sha256(
+                hash_res = self._resolve_file_hash(
                     target_for_content,
                     size=size,
                     mtime=mtime,
-                    full_hash=bool(force_hash and self.hash_full_for_user_ops),
+                    want_full=want_full,
+                    signature=signature,
                 )
-            # Race condition fallback: preserve previous hash on rename/move when file is momentarily locked.
-            if (not hash_sha256) and op_type in {"file_move", "file_rename", "file_move_external"} and before_hash:
-                hash_sha256 = before_hash
+
+            if (not hash_res.value) and prelim_op_type in {"file_move", "file_rename", "file_move_external"} and before_hash:
+                fb_kind = str(before.get("hash_kind") or "unknown")
+                if fb_kind not in {"partial", "full"}:
+                    fb_kind = "unknown"
+                hash_res = _HashResult(
+                    before_hash,
+                    fb_kind,
+                    "fallback_previous_meta",
+                    before.get("hash_bytes_read"),
+                )
+
+            hash_sha256 = hash_res.value
+            if hash_res.kind == "full":
+                hash_sha256_full = hash_res.value
+            elif hash_res.kind == "partial":
+                hash_sha256_partial = hash_res.value
+            elif hash_res.kind == "unknown" and hash_res.value:
+                hash_sha256_partial = hash_res.value
+
+            content_fingerprint_key = (
+                _fingerprint_cache_key(size, hash_res.value, signature) if hash_res.value else None
+            )
+
+            external_create_semantic: Optional[str] = None
+            external_semantic_detail: Dict[str, Any] = {}
+            inferred_source_path: Optional[str] = None
+            copy_move_verdict: Optional[str] = None
+            copy_move_evidence: Optional[str] = None
+            if (
+                evt_kind == "created"
+                and not dp
+                and correlation_action is None
+                and dest_volume_type in {"Removable", "Network"}
+                and hash_res.value
+                and size is not None
+                and exists
+            ):
+                external_create_semantic, inferred_source_path, external_semantic_detail = (
+                    self._infer_external_create_semantic(
+                        dest_path=target_for_content,
+                        dest_size=int(size),
+                        dest_hash=hash_res.value,
+                        ts=ts,
+                        ctx=ctx,
+                    )
+                )
+                copy_move_verdict = external_semantic_detail.get("copy_move_verdict")
+                copy_move_evidence = external_semantic_detail.get("copy_move_evidence")
+                if inferred_source_path is None and external_semantic_detail.get("inferred_source_path"):
+                    inferred_source_path = external_semantic_detail.get("inferred_source_path")
+
+            op_type = _infer_op_type_v2(
+                evt_kind,
+                p,
+                dp,
+                src_volume_type,
+                dest_volume_type,
+                correlation_action,
+                external_create_semantic,
+            )
+            report_op_type = _infer_operation_type(
+                evt_kind,
+                p,
+                dp,
+                overwrite=(evt_kind == "modified"),
+                effective_volume_type=effective_volume_type,
+                correlation_action=correlation_action,
+                external_create_semantic=external_create_semantic,
+            )
+
+            if evt_kind == "moved" and dp:
+                obj_src_drive, obj_src_volume_type = src_drive, src_volume_type
+                obj_dest_drive, obj_dest_volume_type = dest_drive, dest_volume_type
+            elif evt_kind == "created" and not dp:
+                obj_src_drive, obj_src_volume_type = None, None
+                obj_dest_drive, obj_dest_volume_type = dest_drive, dest_volume_type
+            elif evt_kind == "deleted":
+                obj_src_drive, obj_src_volume_type = src_drive, src_volume_type
+                obj_dest_drive, obj_dest_volume_type = None, None
+            else:
+                obj_src_drive, obj_src_volume_type = None, None
+                obj_dest_drive, obj_dest_volume_type = dest_drive, dest_volume_type
+
+            object_identity_strength = _object_identity_strength(hash_res.kind, bool(hash_res.value))
+            identity_tier = "hash" if hash_res.value else "path_fingerprint"
 
             if exists and enrich_flags["need_sample"]:
                 # Prefer text sample for textish files
@@ -1190,7 +1574,10 @@ if True:
             if evt_kind != "deleted":
                 self._last_meta[target_for_content] = {
                     "size": size,
-                    "hash": hash_sha256,
+                    "hash": hash_res.value,
+                    "hash_kind": hash_res.kind,
+                    "hash_source": hash_res.source,
+                    "hash_bytes_read": hash_res.bytes_read,
                     "ext": target_ext,
                     "last_seen_ts": ts,
                 }
@@ -1209,7 +1596,15 @@ if True:
             cmdline = ctx.get("fg_cmdline")
             cloud_provider = _cloud_provider_from_path(dp or p)
             object_id = _stable_object_id(hash_sha256, target_for_content, size=size, mtime=mtime)
-            identity_tier = "hash" if hash_sha256 else "fingerprint"
+
+            if evt_kind != "deleted" and hash_res.value and size is not None and exists:
+                cand_path = p
+                if self._volume_type_effective(_maybe_drive_letter(cand_path)) == "Fixed":
+                    self._remember_fixed_file_observation(
+                        ts, cand_path, int(size), hash_res.value, proc_id, proc_name
+                    )
+
+            ctx_out = self._sanitize_ctx_for_file_external(ctx, dest_volume_type, evt_kind)
 
             file_name = _get_name(target_for_content)
             object_block = self._build_object(
@@ -1217,10 +1612,10 @@ if True:
                 dst_path=dp,
                 size=size,
                 mtime=mtime,
-                src_drive=src_drive,
-                src_volume_type=src_volume_type,
-                dest_drive=dest_drive,
-                dest_volume_type=dest_volume_type,
+                src_drive=obj_src_drive,
+                src_volume_type=obj_src_volume_type,
+                dest_drive=obj_dest_drive,
+                dest_volume_type=obj_dest_volume_type,
                 old_ext=(before_ext if report_event_type == "Rename" else old_ext),
                 new_ext=(target_ext if report_event_type == "Rename" else new_ext),
                 signature=signature,
@@ -1231,11 +1626,18 @@ if True:
                 object_id=object_id,
                 cloud_provider=cloud_provider,
             )
+            object_block["hash_sha256_partial"] = hash_sha256_partial
+            object_block["hash_sha256_full"] = hash_sha256_full
             object_block["metadata"] = {
                 "mtime": _iso_utc(mtime) if isinstance(mtime, (int, float)) else None,
                 "original_size": before_size,
                 "hash_before": before_hash,
                 "hash_after": hash_sha256,
+                "hash_kind": hash_res.kind,
+                "hash_source": hash_res.source,
+                "hash_bytes_read": hash_res.bytes_read,
+                "content_fingerprint_key": content_fingerprint_key,
+                "object_identity_strength": object_identity_strength,
                 "event_type": report_event_type,
                 "operation_type": report_op_type,
                 "identity_tier": identity_tier,
@@ -1272,10 +1674,10 @@ if True:
                 "source": "file",
                 "ts": ts,
                 "timestamp": _iso_utc(ts),
-                "context": ctx,
+                "context": ctx_out,
 
                 # canonical
-                "actor": self._build_actor(ctx),
+                "actor": self._build_actor(ctx_out),
                 "object": object_block,
 
                 # legacy flat fields
@@ -1298,9 +1700,15 @@ if True:
                     "raw_fs_kind": evt_kind,
                     "correlation_action": correlation_action,
                     "correlation": correlation_detail or {},
-                    "src_volume_type": src_volume_type,
+                    "src_volume_type": obj_src_volume_type,
                     "dest_volume_type": dest_volume_type,
+                    "semantic_action": external_create_semantic,
+                    "inferred_source_path": inferred_source_path,
+                    "copy_move_verdict": copy_move_verdict,
+                    "copy_move_evidence": copy_move_evidence,
                     "dlp_semantic_hint": dlp_semantic_hint,
+                    "hash_kind": hash_res.kind,
+                    "hash_source": hash_res.source,
                 },
                 "metrics": {
                     "entropy": entropy,
@@ -1327,6 +1735,13 @@ if True:
                 "File_Size": size,
                 "File_Path": target_for_content,
                 "File_Hash": hash_sha256,
+                "File_Hash_Partial": hash_sha256_partial,
+                "File_Hash_Full": hash_sha256_full,
+                "Hash_Kind": hash_res.kind,
+                "Hash_Source": hash_res.source,
+                "Hash_Bytes_Read": hash_res.bytes_read,
+                "Content_Fingerprint_Key": content_fingerprint_key,
+                "Object_Identity_Strength": object_identity_strength,
                 "File_Signature": signature,
                 "File_Sensitivity": sensitivity,
 
@@ -1334,8 +1749,8 @@ if True:
                 "Dest_Path": dp,
                 "Dest_Volume_Type": dest_volume_type,
                 "Dest_Drive": dest_drive,
-                "Source_Volume_Type": src_volume_type,
-                "Source_Drive": src_drive,
+                "Source_Volume_Type": obj_src_volume_type,
+                "Source_Drive": obj_src_drive,
                 "Cloud_Provider": cloud_provider,
 
                 "Process_Name": proc_name,
@@ -1368,10 +1783,18 @@ if True:
                         "sample_available": bool(sample),
                         "signature_available": bool(signature),
                         "hash_available": bool(hash_sha256),
+                        "hash_kind": hash_res.kind,
+                        "hash_source": hash_res.source,
+                        "hash_bytes_read": hash_res.bytes_read,
                         "identity_tier": identity_tier,
+                        "object_identity_strength": object_identity_strength,
+                        "content_fingerprint_key": content_fingerprint_key,
                         "pid_recent_file_count": pid_summary.get("pid_file_count"),
                         "pid_recent_sensitive_count": pid_summary.get("pid_sensitive_count"),
                         "pid_recent_paths": pid_summary.get("pid_recent_paths"),
+                        "external_create_semantic": external_create_semantic,
+                        "external_semantic_detail": external_semantic_detail,
+                        "inferred_source_path": inferred_source_path,
                     },
                 },
             }
