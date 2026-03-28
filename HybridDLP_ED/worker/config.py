@@ -29,6 +29,11 @@ def _env_float_bounded(name: str, default: float, min_v: float, max_v: float) ->
         return float(max_v)
     return float(v)
 
+def _env_queue_backend() -> str:
+    v = os.getenv("WORKER_QUEUE_BACKEND", "sqlite").strip().lower()
+    return v if v in ("sqlite", "jsonl") else "sqlite"
+
+
 class WorkerConfig:
     """Configuration cho Detection Engine Worker"""
     
@@ -37,18 +42,33 @@ class WorkerConfig:
     WORKER_DIR = WORKER_DIR
     AGENT_DIR = AGENT_DIR
     RUNTIME_DIR = AGENT_DIR / "runtime"
+    # SQLite thống nhất: queue + (mặc định) hash cache — kiến trúc 2 process (Noteupdate)
+    AGENT_STORE_DB = RUNTIME_DIR / "agent_store.db"
     # YARA rules are mounted at /app/yara_rules in Docker
     YARA_RULES_DIR = Path("/app/yara_rules") if Path("/app/yara_rules").exists() else WORKER_DIR / "yara_rules"
     ML_MODELS_DIR = WORKER_DIR / "ml_models"
-    CACHE_DB_PATH = WORKER_DIR / "database" / "cache.db"
+    # Hash cache cùng file agent_store.db (bảng file_cache) trừ khi ghi đè CACHE_DB_PATH
+    CACHE_DB_PATH = Path(os.getenv("CACHE_DB_PATH", str(RUNTIME_DIR / "agent_store.db")))
     LOGS_DIR = WORKER_DIR / "logs"
+    # sqlite: PersistentEventQueue | jsonl: đọc events_*.jsonl (legacy)
+    WORKER_QUEUE_BACKEND = _env_queue_backend()
     
     # IPC Queue Configuration
     # Worker đọc events từ SQLite database
     EVENTS_DB_PATH = RUNTIME_DIR / "events.db"  # SQLite events từ agent
     
-    # Hash Cache
-    HASH_ALGORITHM = "sha256"  # md5 or sha256
+    # Hash Cache (Noteupdate SHA-256 checklist)
+    HASH_ALGORITHM = "sha256"  # md5 or sha256 — đồ án nên dùng sha256
+    HASH_READ_CHUNK_BYTES = int(os.getenv("HASH_READ_CHUNK_BYTES", str(256 * 1024)))  # 256KB; 1MB cũng ổn
+    HASH_COMPUTE_RETRIES = int(os.getenv("HASH_COMPUTE_RETRIES", "3"))
+    HASH_STABILITY_ENABLED = os.getenv("HASH_STABILITY_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    FILE_STABILITY_INTERVAL_SEC = _env_float("FILE_STABILITY_INTERVAL_SEC", 0.15)
+    FILE_STABILITY_MAX_WAIT_SEC = _env_float("FILE_STABILITY_MAX_WAIT_SEC", 3.0)
+    # Invalidação cache khi policy/YARA/model thay đổi (Noteupdate §14)
+    SCAN_ENGINE_VERSION = os.getenv("SCAN_ENGINE_VERSION", "1.0.0").strip() or "1.0.0"
+    POLICY_VERSION = os.getenv("POLICY_VERSION", "1.0.0").strip() or "1.0.0"
+    # Chống alert lặp cùng hash (giây) — Noteupdate §19
+    ALERT_DEDUP_SEC = float(os.getenv("ALERT_DEDUP_SEC", "600"))
     CACHE_CLEANUP_DAYS = 30  # Xóa cache cũ sau 30 ngày
     
     # Fast Scan
@@ -167,9 +187,42 @@ class WorkerConfig:
         'impact_max': 4.0        # Max I on 1–4 scale (Public→Secret)
     }
     
-    # Risk Scoring Method: 'traditional', 'research_based', or 'nist_based'
-    # Mặc định dùng NIST-based theo yêu cầu đồ án
-    RISK_SCORING_METHOD = os.getenv('RISK_SCORING_METHOD', 'nist_based')
+    # Risk Scoring Method: 'traditional', 'research_based', 'nist_based', hoặc 'cvss_dlp' (Noteupdate.txt)
+    RISK_SCORING_METHOD = os.getenv('RISK_SCORING_METHOD', 'nist_based').strip().lower()
+
+    # --- CVSS-inspired DLP (Noteupdate.txt §3–§4) ---
+    CVSS_DLP_BASE_WEIGHTS = {
+        'content_sensitivity': _env_float('CVSS_DLP_W_CONTENT', 0.35),
+        'data_criticality': _env_float('CVSS_DLP_W_CRITICALITY', 0.25),
+        'behavior_anomaly': _env_float('CVSS_DLP_W_BEHAVIOR', 0.25),
+        'confidence': _env_float('CVSS_DLP_W_CONFIDENCE', 0.15),
+    }
+    CVSS_DLP_FUSION_WEIGHTS = {
+        'base': _env_float('CVSS_DLP_F_BASE', 0.60),
+        'maturity': _env_float('CVSS_DLP_F_MATURITY', 0.25),
+        'environmental': _env_float('CVSS_DLP_F_ENV', 0.15),
+    }
+    CVSS_DLP_MATURITY_LEVEL_SCORES = {
+        'U': _env_float('CVSS_DLP_MAT_U', 20.0),
+        'P': _env_float('CVSS_DLP_MAT_P', 50.0),
+        'A': _env_float('CVSS_DLP_MAT_A', 85.0),
+        'X': _env_float('CVSS_DLP_MAT_X', 35.0),
+    }
+    CVSS_DLP_EM_FACTORS = {
+        'U': _env_float('CVSS_DLP_EMF_U', 0.85),
+        'P': _env_float('CVSS_DLP_EMF_P', 1.0),
+        'A': _env_float('CVSS_DLP_EMF_A', 1.25),
+        'X': _env_float('CVSS_DLP_EMF_X', 0.95),
+    }
+    CVSS_DLP_ENV_WEIGHTS = {
+        'user': _env_float('CVSS_DLP_E_USER', 0.30),
+        'time': _env_float('CVSS_DLP_E_TIME', 0.20),
+        'asset': _env_float('CVSS_DLP_E_ASSET', 0.25),
+        'destination': _env_float('CVSS_DLP_E_DEST', 0.25),
+    }
+    CVSS_DLP_USE_FORMULA1_EM_FACTOR = os.getenv('CVSS_DLP_USE_FORMULA1', '0').strip().lower() in {
+        '1', 'true', 'yes', 'on',
+    }
     
     # Sensitive exfiltration folders (Windows paths in agent events)
     # Ví dụ: "C:\\PrivateFolder;D:\\HR_Secret"

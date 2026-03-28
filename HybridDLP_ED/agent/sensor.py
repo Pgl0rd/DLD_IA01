@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import time
 import json
 import signal
@@ -10,6 +11,11 @@ import glob
 import traceback
 from queue import Queue, Full, Empty
 from pathlib import Path
+
+# HybridDLP_ED root — để `import agent.*` khi chạy trực tiếp `python agent/sensor.py`
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
 from typing import Any, Dict, List, Optional, Callable
 from datetime import datetime, timezone
 
@@ -32,6 +38,13 @@ except Exception:
     _HAS_PRINT = False
 
 from agent.event_pipeline import canonicalize_event
+
+try:
+    from agent.persistent_queue import PersistentEventQueue
+    _HAS_PERSISTENT_QUEUE = True
+except Exception:
+    PersistentEventQueue = None  # type: ignore
+    _HAS_PERSISTENT_QUEUE = False
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -287,6 +300,7 @@ def consumer_loop(
     qm: QueueManager,
     sinks: List[Any],
     correlator: Optional[ContextCorrelator] = None,
+    persistent_queue: Optional[Any] = None,
 ) -> None:
     def _drop_noisy_jsonl_event(e: Dict[str, Any]) -> bool:
         etype = str(e.get("type") or "").lower()
@@ -369,6 +383,8 @@ def consumer_loop(
             continue
 
         try:
+            # Correlation nặng (upload_suspected, corr_*) — mặc định tắt ở Sensor;
+            # chạy ở Worker (WORKER_ENABLE_CORRELATOR=1).
             if correlator is not None:
                 try:
                     corr_events = correlator.on_event(event) or []
@@ -378,6 +394,16 @@ def consumer_loop(
                     pass
 
             event_canon = canonicalize_event(event)
+
+            # Fila SQLite bền vững cho Worker (không enqueue heartbeat để giảm tải DB).
+            if persistent_queue is not None:
+                try:
+                    et = str(event_canon.get("type") or "").lower()
+                    if et != "heartbeat":
+                        persistent_queue.enqueue(event_canon)
+                except Exception:
+                    pass
+
             for s in sinks:
                 try:
                     # Noise control on JSONL sink only.
@@ -617,7 +643,22 @@ def main() -> None:
 
     qm_monitor = QueueMonitor(queue_manager=qm, state_dir=STATE_DIR, check_interval_sec=1.0)
 
-    correlator = ContextCorrelator(debug=True)
+    # Kiến trúc 2 tầng: Sensor chỉ enqueue nhẹ; correlator mặc định OFF (Worker xử lý).
+    correlator: Optional[ContextCorrelator] = None
+    if os.getenv("SENSOR_ENABLE_CORRELATOR", "0").strip().lower() in {"1", "true", "yes", "on"}:
+        correlator = ContextCorrelator(debug=True)
+
+    persistent_queue = None
+    if _HAS_PERSISTENT_QUEUE and os.getenv("SENSOR_SQLITE_QUEUE", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }:
+        try:
+            persistent_queue = PersistentEventQueue()
+        except Exception:
+            persistent_queue = None
 
     try:
         ctx: Optional[ContextProvider] = ContextProvider(
@@ -758,7 +799,12 @@ def main() -> None:
     print("[main] entering run loop", flush=True)
 
     threads: List[threading.Thread] = [
-        threading.Thread(name="consumer", target=consumer_loop, args=(stop_event, qm, sinks, correlator), daemon=True),
+        threading.Thread(
+            name="consumer",
+            target=consumer_loop,
+            args=(stop_event, qm, sinks, correlator, persistent_queue),
+            daemon=True,
+        ),
         threading.Thread(name="heartbeat", target=heartbeat_loop, args=(stop_event, qm, hb_interval_sec, hb_file_interval_sec, start_ts, ctx), daemon=True),
         threading.Thread(name="queue_monitor", target=qm_monitor.loop, args=(stop_event,), daemon=True),
     ]

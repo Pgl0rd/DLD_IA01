@@ -11,15 +11,21 @@ from loguru import logger
 import sys
 from pathlib import Path
 
-# Add current directory to path
+# Add current directory + project root (agent L1/L2, ML)
 BASE_DIR = Path(__file__).parent
+PROJECT_ROOT = BASE_DIR.parent
 sys.path.insert(0, str(BASE_DIR))
+sys.path.insert(0, str(PROJECT_ROOT))
 
 from config import WorkerConfig
 
-# Import các modules
-# Use JSONL consumer instead of SQLite to avoid database locking issues
-from core.jsonl_queue_consumer import JSONLQueueConsumer as QueueConsumer
+# Queue: sqlite (mặc định, bền vững) | jsonl (legacy)
+def _make_queue_consumer():
+    if WorkerConfig.WORKER_QUEUE_BACKEND == "sqlite":
+        from core.sqlite_queue_consumer import SQLiteQueueConsumer
+        return SQLiteQueueConsumer()
+    from core.jsonl_queue_consumer import JSONLQueueConsumer
+    return JSONLQueueConsumer()
 from core.hash_cache import HashCacheManager
 from core.fast_scan import FastScanEngine
 from core.deep_analysis import DeepAnalysisEngine
@@ -27,6 +33,7 @@ from core.risk_scoring import RiskScoringEngine
 from core.action_executor import ActionExecutor
 from core.report_generator import ReportGenerator
 from core.behavioral_rules import BehavioralRulesEngine
+from core.file_stability import wait_until_file_stable
 # Import ML module from ML folder
 ML_DIR = Path(__file__).parent.parent / "ML"
 if ML_DIR.exists():
@@ -37,13 +44,29 @@ else:
     from ml_pipeline.behavioral_ml_analyzer import BehavioralMLAnalyzer
 
 
+def _make_correlator_and_pqueue():
+    """Correlation / upload_suspected — chạy ở Worker (Noteupdate). Luôn có PersistentEventQueue (enqueue corr_*)."""
+    from agent.persistent_queue import PersistentEventQueue
+
+    pq = PersistentEventQueue(db_path=WorkerConfig.AGENT_STORE_DB)
+    if os.getenv("WORKER_ENABLE_CORRELATOR", "1").strip().lower() not in {"1", "true", "yes", "on"}:
+        return None, pq
+    try:
+        from agent.sensors.context_correlator import ContextCorrelator
+
+        return ContextCorrelator(debug=True), pq
+    except Exception as e:
+        logger.warning(f"Correlator không khởi tạo: {e}")
+        return None, pq
+
+
 class DetectionEngine:
     """Detection Engine Main Class"""
     
     def __init__(self):
         logger.info("Initializing Detection Engine components...")
 
-        self.queue_consumer = QueueConsumer()
+        self.queue_consumer = _make_queue_consumer()
         self.hash_cache = HashCacheManager()
         self.fast_scan = FastScanEngine()
         self.deep_analysis = DeepAnalysisEngine()
@@ -51,7 +74,11 @@ class DetectionEngine:
         self.action_executor = ActionExecutor()
         self.report_generator = ReportGenerator()
         self.behavioral_rules = BehavioralRulesEngine()  # Behavioral rules engine
-        self.ml_analyzer = BehavioralMLAnalyzer()  # UEBA ML analyzer
+        # Lazy UEBA — không load model trong __init__ (Noteupdate: lazy ML)
+        self._ml_analyzer = None
+        self._correlator, self._pqueue = _make_correlator_and_pqueue()
+        # Chống alert trùng cùng SHA-256 trong cửa sổ thời gian (Noteupdate §19)
+        self._alert_dedup = {}  # type: ignore[var-annotated]
         
         # Event history buffer for ML frequency features (last 1000 events)
         self.event_history = []
@@ -61,7 +88,16 @@ class DetectionEngine:
         self.processed_count = 0
         self.error_count = 0
         
-        logger.info("Detection Engine initialized successfully")
+        logger.info(
+            f"Detection Engine initialized (queue={WorkerConfig.WORKER_QUEUE_BACKEND}, "
+            f"correlator={self._correlator is not None})"
+        )
+
+    @property
+    def ml_analyzer(self):
+        if self._ml_analyzer is None:
+            self._ml_analyzer = BehavioralMLAnalyzer()
+        return self._ml_analyzer
     
     def process_event(self, event: dict) -> bool:
         """
@@ -72,6 +108,15 @@ class DetectionEngine:
         - Clipboard events: có content.sample hoặc clipboard.text_file
         - Other events: heartbeat, usb_mounted, etc.
         """
+        # Correlation (upload_suspected, corr_*) — đẩy thêm event vào queue SQLite
+        if self._correlator is not None:
+            try:
+                ev_clean = {k: v for k, v in event.items() if k != "_queue_id"}
+                for ce in self._correlator.on_event(ev_clean) or []:
+                    self._pqueue.enqueue(ce)
+            except Exception:
+                pass
+
         event_id = event.get('event_id', 'unknown')
         event_type = event.get('type') or event.get('event_type', 'unknown')
         pid = os.getpid()
@@ -160,6 +205,16 @@ class DetectionEngine:
             except Exception as e:
                 logger.warning(f"Error checking file size: {e}")
                 return False
+            
+            # Debounce: chờ file ổn định (size/mtime) trước khi hash (Noteupdate §17)
+            if getattr(WorkerConfig, "HASH_STABILITY_ENABLED", True):
+                if not wait_until_file_stable(
+                    file_path,
+                    interval_sec=float(getattr(WorkerConfig, "FILE_STABILITY_INTERVAL_SEC", 0.15)),
+                    max_wait_sec=float(getattr(WorkerConfig, "FILE_STABILITY_MAX_WAIT_SEC", 3.0)),
+                ):
+                    logger.debug(f"File not stable in time, will retry: {file_path}")
+                    return False
             
             # 1. Check Panic Mode
             panic_mode = self.queue_consumer.check_panic_mode()
@@ -355,10 +410,24 @@ class DetectionEngine:
                 file_path
             )
             
-            # 8. Action Executor (với report fields)
+            # 8. Action Executor (với report fields); dedup alert cùng hash (Noteupdate §19)
             action = risk_result['action']
+            now_ts = time.time()
+            dedup_sec = float(getattr(WorkerConfig, "ALERT_DEDUP_SEC", 600))
+            suppress_alert = False
+            if action == "alert" and file_hash and dedup_sec > 0:
+                last_alert = self._alert_dedup.get(file_hash)
+                if last_alert is not None and (now_ts - last_alert) < dedup_sec:
+                    suppress_alert = True
+                    logger.info(
+                        f"Alert dedup: same SHA-256 within {dedup_sec}s — downgrade to log "
+                        f"(hash {file_hash[:16]}…)"
+                    )
+            exec_action = "log" if suppress_alert else action
+            if action == "alert" and not suppress_alert:
+                self._alert_dedup[file_hash] = now_ts
             self.action_executor.execute(
-                action,
+                exec_action,
                 file_path,
                 risk_result['total_score'],
                 risk_result['details'],
@@ -376,6 +445,16 @@ class DetectionEngine:
                 risk_result['total_score'],
                 action
             )
+            try:
+                self._pqueue.insert_scan_result(
+                    event_ref=str(event.get("event_id") or ""),
+                    file_hash=file_hash,
+                    risk_score=float(risk_result["total_score"]),
+                    scan_summary=scan_result,
+                    payload={"action": action, "path": str(file_path)},
+                )
+            except Exception:
+                pass
             
             # Update Event History for ML
             self.event_history.append(event.copy())
@@ -876,7 +955,24 @@ class DetectionEngine:
                         f"event_id={event_id}, type={event_type}, "
                         f"source={event.get('source', 'unknown')}"
                     )
-                    self.process_event(event)
+                    qid = event.get("_queue_id")
+                    try:
+                        self.process_event(event)
+                    except Exception as proc_err:
+                        self.error_count += 1
+                        logger.error(f"process_event failed: {proc_err}", exc_info=True)
+                        if hasattr(self.queue_consumer, "fail") and qid is not None:
+                            try:
+                                self.queue_consumer.fail(qid, str(proc_err))
+                            except Exception:
+                                pass
+                        time.sleep(0.2)
+                        continue
+                    if hasattr(self.queue_consumer, "ack") and qid is not None:
+                        try:
+                            self.queue_consumer.ack(qid)
+                        except Exception as e:
+                            logger.warning(f"ack queue id={qid} failed: {e}")
                 else:
                     # No event, sleep briefly
                     time.sleep(0.1)

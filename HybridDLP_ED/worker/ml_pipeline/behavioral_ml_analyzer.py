@@ -50,10 +50,7 @@ class BehavioralMLAnalyzer:
         self.feature_names = []
         self.feature_extractor = EventFeatureExtractor()
         self.is_loaded = False
-        
-        if self.model_path.exists():
-            self.load_model()
-        else:
+        if not self.model_path.exists():
             logger.warning(f"UEBA model not found at {self.model_path}. Anomaly detection disabled.")
     
     def load_model(self) -> bool:
@@ -94,6 +91,8 @@ class BehavioralMLAnalyzer:
             - is_anomaly: bool
             - features: numpy array
         """
+        if self.model_path.exists() and not self.is_loaded:
+            self.load_model()
         if not self.is_loaded or self.model is None:
             return {
                 'anomaly_score': 0.0,
@@ -145,5 +144,7 @@ class BehavioralMLAnalyzer:
     
     def is_available(self) -> bool:
         """Check if model is loaded and available"""
+        if self.model_path.exists() and not self.is_loaded:
+            self.load_model()
         return self.is_loaded and self.model is not None
 

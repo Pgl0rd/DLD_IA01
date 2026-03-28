@@ -20,6 +20,14 @@ if True:
         FileSystemEventHandler = object
         _HAS_WATCHDOG = False
 
+    try:
+        from .volume_watch_manager import VolumeWatchManager
+        from .file_correlation import FileCorrelationEngine, RawPendingEvent
+    except ImportError:
+        VolumeWatchManager = None  # type: ignore[misc, assignment]
+        FileCorrelationEngine = None  # type: ignore[misc, assignment]
+        RawPendingEvent = None  # type: ignore[misc, assignment]
+
 
     # -----------------------------
     # Lightweight helpers (Windows-first)
@@ -162,6 +170,18 @@ if True:
         return hashlib.sha256(base.encode("utf-8", errors="ignore")).hexdigest()[:24]
 
 
+    def _stable_object_id(
+        file_hash: Optional[str],
+        path: str,
+        size: Optional[int],
+        mtime: Optional[float],
+    ) -> str:
+        if file_hash:
+            return hashlib.sha256(f"h|{file_hash}".encode("utf-8", errors="ignore")).hexdigest()[:24]
+        fp = f"{size if size is not None else 'na'}|{mtime if mtime is not None else 'na'}"
+        return hashlib.sha256(f"fp|{fp}|{path.lower()}".encode("utf-8", errors="ignore")).hexdigest()[:24]
+
+
     def _signature_from_magic(head: bytes, ext: str = "") -> Optional[str]:
         if not head:
             return None
@@ -287,6 +307,47 @@ if True:
         return "file_event"
 
 
+    def _infer_op_type_v2(
+        evt_kind: str,
+        src_path: str,
+        dst_path: Optional[str],
+        src_volume_type: Optional[str],
+        dest_volume_type: Optional[str],
+        correlation_action: Optional[str] = None,
+    ) -> str:
+        if correlation_action == "move_to_external":
+            return "file_move_external"
+        if correlation_action == "move_same_volume":
+            return "file_move"
+        if correlation_action == "copy_to_external":
+            return "file_copy_external"
+
+        if evt_kind == "deleted":
+            return "file_delete"
+        if evt_kind == "modified":
+            return "file_modify"
+
+        if evt_kind == "moved":
+            if dst_path and _is_same_parent(src_path, dst_path) and _get_name(src_path) != _get_name(dst_path):
+                return "file_rename"
+            sd = _maybe_drive_letter(src_path)
+            dd = _maybe_drive_letter(dst_path) if dst_path else None
+            if sd and dd and sd != dd:
+                if dest_volume_type in {"Removable", "Network"} or _is_cloud_path(dst_path or ""):
+                    return "file_move_external"
+            return "file_move"
+
+        if evt_kind == "created":
+            vt = dest_volume_type or src_volume_type
+            if vt in {"Removable", "Network"}:
+                return "file_copy_external"
+            if _is_cloud_path(src_path) or (dst_path and _is_cloud_path(dst_path)):
+                return "file_copy_external"
+            return "file_create"
+
+        return _infer_op_type(evt_kind, src_path, dst_path, dest_volume_type or src_volume_type)
+
+
     def _infer_report_event_type(evt_kind: str, src_path: str, dst_path: Optional[str]) -> str:
         if evt_kind == "created":
             return "Create"
@@ -307,7 +368,21 @@ if True:
         return "Modify"
 
 
-    def _infer_operation_type(evt_kind: str, src_path: str, dst_path: Optional[str], overwrite: bool = False, effective_volume_type: Optional[str] = None) -> str:
+    def _infer_operation_type(
+        evt_kind: str,
+        src_path: str,
+        dst_path: Optional[str],
+        overwrite: bool = False,
+        effective_volume_type: Optional[str] = None,
+        correlation_action: Optional[str] = None,
+    ) -> str:
+        if correlation_action == "move_to_external":
+            return "MoveExternal"
+        if correlation_action == "move_same_volume":
+            return "Move"
+        if correlation_action == "copy_to_external":
+            return "CopyExternal"
+
         if evt_kind == "moved":
             try:
                 if dst_path and Path(src_path).parent == Path(dst_path).parent and Path(src_path).name != Path(dst_path).name:
@@ -344,14 +419,14 @@ if True:
     def _should_enrich(path: str, dst_path: Optional[str], ext: str, dest_volume_type: Optional[str], op_type: str) -> Dict[str, bool]:
         risk_dst = bool((dst_path and _is_cloud_path(dst_path)) or _is_cloud_path(path))
         risk_volume = bool(dest_volume_type is not None and dest_volume_type != "Fixed")
-        rename_like = bool(op_type in {"file_move", "file_rename"} and dst_path and (_get_ext(path) != _get_ext(dst_path)))
+        rename_like = bool(op_type in {"file_move", "file_rename", "file_move_external"} and dst_path and (_get_ext(path) != _get_ext(dst_path)))
         archive_like = (ext in _ARCHIVE_EXTS) or bool(dst_path and _get_ext(dst_path) in _ARCHIVE_EXTS)
         tabular_like = ext in _TABULAR_EXTS
         textish_like = ext in _TEXTISH_EXTS
 
         return {
             "need_signature": bool(risk_dst or risk_volume or rename_like or archive_like or tabular_like),
-            "need_hash": bool(risk_dst or risk_volume or rename_like or op_type in {"file_copy", "file_copy_external", "file_move", "file_rename"}),
+            "need_hash": bool(risk_dst or risk_volume or rename_like or op_type in {"file_copy", "file_copy_external", "file_move", "file_move_external", "file_rename"}),
             "need_entropy": bool(archive_like or rename_like),
             "need_zip_pw": bool((ext == ".zip") or (dst_path and _get_ext(dst_path) == ".zip")),
             "need_sample": bool(tabular_like or textish_like),
@@ -445,6 +520,34 @@ if True:
             self._last_meta: Dict[str, Dict[str, Any]] = {}
 
             self._observer = None
+            self._watch_handler_ref: Any = None
+            self._observed_watch_by_path: Dict[str, Any] = {}
+            self._volume_manager: Any = None
+
+            # Default > 0 merges same-volume delete+create and C:→USB pairs without extra env.
+            # Set FILE_SENSOR_CORRELATION_WINDOW_SEC=0 to disable (legacy two-event behavior).
+            cw = float(os.getenv("FILE_SENSOR_CORRELATION_WINDOW_SEC", "0.75"))
+            self._correlation_engine = (
+                FileCorrelationEngine(cw) if (cw > 0 and FileCorrelationEngine is not None) else None
+            )
+
+            if os.name == "nt" and VolumeWatchManager is not None and os.getenv(
+                "FILE_SENSOR_VOLUME_WATCH", "1"
+            ).strip().lower() in {"1", "true", "yes", "on"}:
+                self._volume_manager = VolumeWatchManager(
+                    poll_interval_sec=float(os.getenv("FILE_SENSOR_VOLUME_POLL_SEC", "3")),
+                    on_mount=self._volume_mount_callback,
+                    on_unmount=self._volume_unmount_callback,
+                    emit_event=self._emit,
+                )
+
+            # Soft-ignore: still emit with flags.soft_noise_path (comma/semicolon path substring list, lowered)
+            _soft_raw = os.getenv("FILE_SENSOR_SOFT_NOISE_TOKENS", "")
+            self._soft_noise_path_tokens = tuple(
+                x.strip().lower().replace("/", "\\")
+                for x in _soft_raw.replace(",", ";").split(";")
+                if x.strip()
+            )
 
             # Noise suppression (ported concept from Sensor/sensor_system/sensors/file_sensor.py)
             # Goal: reduce duplicates / false positives from temp caches and fast re-writes.
@@ -456,7 +559,8 @@ if True:
             self._max_events_per_process_window = int(os.getenv("FILE_SENSOR_MAX_EVENTS_PER_PROCESS_WINDOW", "40"))
             self._recent_event_keys: Dict[str, float] = {}
             self._recent_event_times_by_pid: Dict[str, deque[float]] = {}
-            self._noise_path_tokens = (
+            # Chuỗi so sánh với path đã .lower() — luôn viết thường (Note: trước đây HybridDLP_ED hoa → không khớp).
+            _default_noise = (
                 "\\windows\\",
                 "\\program files\\",
                 "\\program files (x86)\\",
@@ -470,74 +574,241 @@ if True:
                 "\\local storage\\leveldb\\",
                 "\\session storage\\",
                 "\\webstorage\\",
-                "\\Antigravity\\",
+                "\\antigravity\\",
                 "\\code cache\\",
                 "\\gpucache\\",
-                "\\Python\\Python312\\",
-                "\\HybridDLP_ED\\",
-                "\\Programs\\cursor\\",
-                "\\Roaming\\GitHub Desktop\\",
-                "\\zalo\\Local Storage\\",
+                "\\python\\python312\\",
+                "\\python\\python311\\",
+                "\\python\\python310\\",
+                "\\hybriddlp_ed\\",
+                "\\dld_ia01\\",
+                "\\programs\\cursor\\",
+                "\\.cursor\\",
+                "\\.vscode\\",
+                "\\.idea\\",
+                "\\roaming\\github desktop\\",
+                "\\zalo\\local storage\\",
                 "\\network\\",
                 "\\logs\\",
                 "\\indexeddb\\",
                 "\\service worker\\",
-                "\\LocalState\\TabState\\",
-                "\\Microsoft Visual Studio\\",
+                "\\localstate\\tabstate\\",
+                "\\microsoft visual studio\\",
+                "\\.git\\",
+                "\\__pycache__\\",
+                "\\node_modules\\",
+                "\\.pytest_cache\\",
+                "\\.venv\\",
+                "\\venv\\",
+                "\\site-packages\\",
+                "\\.mypy_cache\\",
+                "\\.ruff_cache\\",
+                "\\dist\\",
+                "\\build\\",
+                "\\.egg-info\\",
+            )
+            extra = os.getenv("FILE_SENSOR_EXTRA_NOISE_TOKENS", "").strip()
+            _extra_toks = tuple(
+                x.strip().lower()
+                for x in extra.split(";")
+                if x.strip()
+            )
+            self._noise_path_tokens = tuple(
+                t.lower().replace("/", "\\") for t in (_default_noise + _extra_toks)
             )
             self._noise_extensions = {
                 ".tmp",
                 ".temp",
                 ".log",
+                ".log1",
+                ".log2",
                 ".mui",
                 ".nlp",
                 ".dll",
                 ".db",
-                ".json",
                 ".jsonl",
                 ".ldb",
                 ".sqlite",
                 ".journal",
                 ".wal",
                 ".idx",
-                ".DB-wal",
                 ".pack",
                 ".pkl",
-                ".db-wal",
-                ".db-journal",
-                ".db-shm",
-                ".db-wal",
-                ".db-journal",
-                ".db-shm",
-                ".db-wal",
-                ".db-journal",
-                ".db-shm",
                 ".bin",
                 ".exe",
+                ".pyc",
+                ".pyo",
+                ".pyd",
+                ".so",
+                ".cache",
+                ".lock",
+                ".bak",
+                ".swp",
+                ".swo",
+                ".db-wal",
+                ".db-journal",
+                ".db-shm",
             }
+            # .json trong noise gây bỏ sót file cấu hình nhạy cảm — chỉ lọc .json dưới thư mục cache/editor
+            self._noise_json_path_markers = (
+                "\\cache\\",
+                "leveldb",
+                "code cache",
+                "vscode",
+                "cursor",
+                "appdata",
+                "node_modules",
+                ".git",
+            )
 
         def add_watch_path(self, path: str) -> None:
             p = _norm_path(path)
             try:
-                if p and p not in self.watch_paths and os.path.isdir(p):
-                    self.watch_paths.append(p)
+                if p and os.path.isdir(p):
+                    if p not in self.watch_paths:
+                        self.watch_paths.append(p)
+                    self._schedule_observer_path(p)
             except Exception:
                 pass
 
-        def _should_ignore(self, path: str) -> bool:
-            lp = (path or "").lower()
-            if self.exclude_dirs and any(x in lp for x in self.exclude_dirs):
-                return True
-            if any(tok in lp for tok in self._noise_path_tokens):
-                return True
+        def _volume_mount_callback(self, root: str, vt: str) -> None:
+            self.add_watch_path(root)
+
+        def _volume_unmount_callback(self, root: str) -> None:
+            self._unschedule_observer_path(_norm_path(root))
+
+        def _schedule_observer_path(self, path: str) -> None:
+            if not path or not os.path.isdir(path):
+                return
+            if path in self._observed_watch_by_path:
+                return
+            obs = self._observer
+            h = self._watch_handler_ref
+            if not obs or not h:
+                return
             try:
-                if Path(lp).suffix in self._noise_extensions:
-                    return True
+                w = obs.schedule(h, path, recursive=True)
+                self._observed_watch_by_path[path] = w
+            except Exception:
+                pass
+
+        def _unschedule_observer_path(self, path: str) -> None:
+            p = _norm_path(path)
+            to_drop = [
+                k
+                for k in list(self._observed_watch_by_path.keys())
+                if _norm_path(k).lower() == p.lower()
+            ]
+            obs = self._observer
+            for k in to_drop:
+                w = self._observed_watch_by_path.pop(k, None)
+                if obs and w is not None:
+                    try:
+                        obs.unschedule(w)
+                    except Exception:
+                        try:
+                            obs.remove_watch(w)  # type: ignore[attr-defined]
+                        except Exception:
+                            pass
+            self.watch_paths[:] = [
+                w for w in self.watch_paths if _norm_path(w).lower() != p.lower()
+            ]
+
+        def _ignore_level(self, path: str) -> str:
+            lp = (path or "").lower().replace("/", "\\")
+            if self.exclude_dirs and any((x or "").lower() in lp for x in self.exclude_dirs):
+                return "hard"
+            if any(tok in lp for tok in self._noise_path_tokens):
+                return "hard"
+            try:
+                suf = Path(lp).suffix
+                if suf in self._noise_extensions:
+                    return "hard"
+                if suf == ".json" and any(m in lp for m in self._noise_json_path_markers):
+                    return "hard"
             except Exception:
                 pass
             if self.include_exts is not None:
-                return _get_ext(path) not in self.include_exts
-            return False
+                if _get_ext(path) not in self.include_exts:
+                    return "hard"
+            if self._soft_noise_path_tokens and any(tok in lp for tok in self._soft_noise_path_tokens):
+                return "soft"
+            return "ok"
+
+        def _should_ignore(self, path: str) -> bool:
+            return self._ignore_level(path) == "hard"
+
+        def _ingest_fs_event(
+            self,
+            evt_kind: str,
+            src_path: str,
+            dst_path: Optional[str],
+            ctx: Dict[str, Any],
+        ) -> None:
+            p = _norm_path(src_path)
+            dp = _norm_path(dst_path) if dst_path else None
+            target = dp or p
+            lev = self._ignore_level(target)
+            if lev == "hard":
+                return
+            soft = lev == "soft"
+
+            if self._should_drop_burst_event(evt_kind, p, dp, ctx):
+                return
+
+            src_drive = _maybe_drive_letter(p)
+            dst_drive = _maybe_drive_letter(dp) if dp else None
+            src_vol = _volume_type_windows(src_drive)
+            dst_vol = _volume_type_windows(dst_drive) if dp else None
+
+            size_hint: Optional[int] = None
+            if evt_kind == "deleted":
+                meta = self._last_meta.get(p)
+                if meta:
+                    size_hint = meta.get("size")
+            else:
+                st = self._stat_best_effort(dp or p)
+                if st.get("size") is not None:
+                    size_hint = int(st["size"])
+
+            if not self._correlation_engine or RawPendingEvent is None:
+                try:
+                    self._emit(
+                        self._build_event(
+                            evt_kind, src_path, dst_path, ctx, soft_noise=soft, skip_dedup=True
+                        )
+                    )
+                except RuntimeError:
+                    pass
+                return
+
+            raw = RawPendingEvent(
+                ts=_now(),
+                kind=evt_kind,
+                src_path=p,
+                dst_path=dp,
+                ctx=ctx,
+                size_hint=size_hint,
+                hash_hint=(self._last_meta.get(p) or {}).get("hash") if evt_kind == "deleted" else None,
+                src_volume_type=src_vol,
+                dst_volume_type=dst_vol,
+            )
+            for plan in self._correlation_engine.handle(raw, _now()):
+                try:
+                    self._emit(
+                        self._build_event(
+                            plan.evt_kind,
+                            plan.src_path,
+                            plan.dst_path,
+                            plan.ctx,
+                            correlation_action=plan.correlation_action,
+                            correlation_detail=plan.correlation_detail,
+                            soft_noise=soft,
+                            skip_dedup=True,
+                        )
+                    )
+                except RuntimeError:
+                    pass
 
         def _hash_cache_key(self, path: str, size: Optional[int], mtime: Optional[float]) -> Optional[str]:
             if not path:
@@ -798,15 +1069,22 @@ if True:
             src_path: str,
             dst_path: Optional[str],
             ctx: Dict[str, Any],
+            *,
+            correlation_action: Optional[str] = None,
+            correlation_detail: Optional[Dict[str, Any]] = None,
+            soft_noise: bool = False,
+            skip_dedup: bool = False,
         ) -> Dict[str, Any]:
             ts = _now()
             p = _norm_path(src_path)
             dp = _norm_path(dst_path) if dst_path else None
 
-            if self._should_ignore(dp or p):
+            lev = self._ignore_level(dp or p)
+            if lev == "hard":
                 raise RuntimeError("ignored")
+            soft_noise = bool(soft_noise or lev == "soft")
 
-            if self._should_drop_burst_event(evt_kind, p, dp, ctx):
+            if (not skip_dedup) and self._should_drop_burst_event(evt_kind, p, dp, ctx):
                 raise RuntimeError("ignored")
 
             target_for_content = dp or p
@@ -820,9 +1098,18 @@ if True:
             effective_drive = dest_drive or src_drive
             effective_volume_type = dest_volume_type or src_volume_type
 
-            op_type = _infer_op_type(evt_kind, p, dp, effective_volume_type)
+            op_type = _infer_op_type_v2(
+                evt_kind, p, dp, src_volume_type, dest_volume_type, correlation_action
+            )
             report_event_type = _infer_report_event_type(evt_kind, p, dp)
-            report_op_type = _infer_operation_type(evt_kind, p, dp, overwrite=(evt_kind == "modified"), effective_volume_type=effective_volume_type)
+            report_op_type = _infer_operation_type(
+                evt_kind,
+                p,
+                dp,
+                overwrite=(evt_kind == "modified"),
+                effective_volume_type=effective_volume_type,
+                correlation_action=correlation_action,
+            )
             event_type = "file_renamed" if report_event_type == "Rename" else f"file_{evt_kind}"
 
             old_ext = None
@@ -830,7 +1117,7 @@ if True:
             src_ext = _get_ext(p)
             target_ext = _get_ext(target_for_content)
 
-            if op_type in {"file_move", "file_rename"} and dp:
+            if op_type in {"file_move", "file_rename", "file_move_external"} and dp:
                 old_ext = _get_ext(p)
                 new_ext = _get_ext(dp)
 
@@ -874,7 +1161,16 @@ if True:
 
             force_hash = bool(
                 self.require_sha256_for_user_ops
-                and op_type in {"file_copy", "file_copy_external", "file_move", "file_rename", "file_create", "file_modify"}
+                and op_type
+                in {
+                    "file_copy",
+                    "file_copy_external",
+                    "file_move",
+                    "file_move_external",
+                    "file_rename",
+                    "file_create",
+                    "file_modify",
+                }
             )
             if exists and (enrich_flags["need_hash"] or force_hash):
                 hash_sha256 = self._get_or_compute_sha256(
@@ -884,7 +1180,7 @@ if True:
                     full_hash=bool(force_hash and self.hash_full_for_user_ops),
                 )
             # Race condition fallback: preserve previous hash on rename/move when file is momentarily locked.
-            if (not hash_sha256) and op_type in {"file_move", "file_rename"} and before_hash:
+            if (not hash_sha256) and op_type in {"file_move", "file_rename", "file_move_external"} and before_hash:
                 hash_sha256 = before_hash
 
             if exists and enrich_flags["need_sample"]:
@@ -912,7 +1208,8 @@ if True:
             proc_id = ctx.get("fg_pid")
             cmdline = ctx.get("fg_cmdline")
             cloud_provider = _cloud_provider_from_path(dp or p)
-            object_id = _object_id(target_for_content, size=size, mtime=mtime)
+            object_id = _stable_object_id(hash_sha256, target_for_content, size=size, mtime=mtime)
+            identity_tier = "hash" if hash_sha256 else "fingerprint"
 
             file_name = _get_name(target_for_content)
             object_block = self._build_object(
@@ -941,6 +1238,7 @@ if True:
                 "hash_after": hash_sha256,
                 "event_type": report_event_type,
                 "operation_type": report_op_type,
+                "identity_tier": identity_tier,
             }
             object_block["content_preview"] = sample
             object_block["content_preview_len"] = sample_len
@@ -948,6 +1246,13 @@ if True:
             dest_like_external = bool(effective_volume_type in {"Removable", "Network"} or cloud_provider)
             if op_type == "file_copy_external":
                 report_op_type = "CopyExternal"
+            if op_type == "file_move_external":
+                report_op_type = "MoveExternal"
+            dlp_semantic_hint = "local"
+            if op_type in {"file_copy_external", "file_move_external"}:
+                dlp_semantic_hint = "external_transfer"
+            elif cloud_provider:
+                dlp_semantic_hint = "cloud_sync_path"
             rename_ext_changed = bool((before_ext or old_ext) and (target_ext or new_ext) and (before_ext or old_ext) != (target_ext or new_ext))
             recent_staging = self._recent_staging_count(ts)
             self._remember_file_by_pid(
@@ -990,6 +1295,12 @@ if True:
                 "operation": {
                     "op_type": op_type,
                     "tool": proc_name,
+                    "raw_fs_kind": evt_kind,
+                    "correlation_action": correlation_action,
+                    "correlation": correlation_detail or {},
+                    "src_volume_type": src_volume_type,
+                    "dest_volume_type": dest_volume_type,
+                    "dlp_semantic_hint": dlp_semantic_hint,
                 },
                 "metrics": {
                     "entropy": entropy,
@@ -999,6 +1310,7 @@ if True:
                 },
                 "flags": {
                     "password_protected": pw_protected,
+                    "soft_noise_path": soft_noise,
                 },
                 "content": {
                     "sample": sample,
@@ -1043,6 +1355,11 @@ if True:
                 "New_Extension": target_ext if report_event_type == "Rename" else new_ext,
 
                 "debug": {
+                    "layers": {
+                        "raw_fs": evt_kind,
+                        "correlation": correlation_detail or {},
+                        "dlp_semantic_hint": dlp_semantic_hint,
+                    },
                     "evidence": {
                         "dest_like_external": dest_like_external,
                         "rename_ext_changed": rename_ext_changed,
@@ -1051,10 +1368,11 @@ if True:
                         "sample_available": bool(sample),
                         "signature_available": bool(signature),
                         "hash_available": bool(hash_sha256),
+                        "identity_tier": identity_tier,
                         "pid_recent_file_count": pid_summary.get("pid_file_count"),
                         "pid_recent_sensitive_count": pid_summary.get("pid_sensitive_count"),
                         "pid_recent_paths": pid_summary.get("pid_recent_paths"),
-                    }
+                    },
                 },
             }
 
@@ -1080,15 +1398,11 @@ if True:
                     if getattr(event, "is_directory", False):
                         return
                     ctx = self.outer._ctx_snapshot(ctx_provider)
-                    # Suppress noisy modified events shortly after create (debounce)
                     try:
                         self.outer._mark_suppress_modified(getattr(event, "src_path", None))
                     except Exception:
                         pass
-                    try:
-                        self.outer._emit(self.outer._build_event("created", event.src_path, None, ctx))
-                    except RuntimeError:
-                        return
+                    self.outer._ingest_fs_event("created", event.src_path, None, ctx)
 
                 def on_modified(self, event):
                     if getattr(event, "is_directory", False):
@@ -1096,53 +1410,82 @@ if True:
                     if self.outer._should_suppress_modified(getattr(event, "src_path", None)):
                         return
                     ctx = self.outer._ctx_snapshot(ctx_provider)
-                    try:
-                        self.outer._emit(self.outer._build_event("modified", event.src_path, None, ctx))
-                    except RuntimeError:
-                        return
+                    self.outer._ingest_fs_event("modified", event.src_path, None, ctx)
 
                 def on_deleted(self, event):
                     if getattr(event, "is_directory", False):
                         return
                     ctx = self.outer._ctx_snapshot(ctx_provider)
-                    try:
-                        self.outer._emit(self.outer._build_event("deleted", event.src_path, None, ctx))
-                    except RuntimeError:
-                        return
+                    self.outer._ingest_fs_event("deleted", event.src_path, None, ctx)
 
                 def on_moved(self, event):
                     if getattr(event, "is_directory", False):
                         return
                     ctx = self.outer._ctx_snapshot(ctx_provider)
                     try:
-                        self.outer._emit(self.outer._build_event("moved", event.src_path, event.dest_path, ctx))
-                    except RuntimeError:
-                        return
+                        self.outer._mark_suppress_modified(getattr(event, "dest_path", None))
+                    except Exception:
+                        pass
+                    self.outer._ingest_fs_event(
+                        "moved", event.src_path, getattr(event, "dest_path", None), ctx
+                    )
 
+            vol_mgr = self._volume_manager
             try:
                 handler = _Handler(self)
                 observer = Observer()
                 self._observer = observer
+                self._watch_handler_ref = handler
+                self._observed_watch_by_path.clear()
 
-                for p in self.watch_paths:
+                if vol_mgr:
                     try:
-                        observer.schedule(handler, p, recursive=True)
+                        vol_mgr.sync_once()
                     except Exception:
                         pass
 
+                for p in list(self.watch_paths):
+                    self._schedule_observer_path(p)
+
                 observer.start()
+                if vol_mgr:
+                    vol_mgr.start()
 
                 while not stop_event.is_set():
                     time.sleep(0.25)
+                    if self._correlation_engine:
+                        for plan in self._correlation_engine.tick_flush(_now()):
+                            try:
+                                self._emit(
+                                    self._build_event(
+                                        plan.evt_kind,
+                                        plan.src_path,
+                                        plan.dst_path,
+                                        plan.ctx,
+                                        correlation_action=plan.correlation_action,
+                                        correlation_detail=plan.correlation_detail,
+                                        skip_dedup=True,
+                                    )
+                                )
+                            except RuntimeError:
+                                pass
 
                 try:
                     observer.stop()
                     observer.join(timeout=2.0)
                 except Exception:
                     pass
-
             except Exception:
                 self._run_polling(stop_event, ctx_provider)
+            finally:
+                if vol_mgr:
+                    try:
+                        vol_mgr.stop()
+                    except Exception:
+                        pass
+                self._observer = None
+                self._watch_handler_ref = None
+                self._observed_watch_by_path.clear()
 
         # -----------------------------
         # Polling fallback
@@ -1155,7 +1498,7 @@ if True:
                         for fn in filenames:
                             fp = os.path.join(dirpath, fn)
                             fp_norm = _norm_path(fp)
-                            if self._should_ignore(fp_norm):
+                            if self._ignore_level(fp_norm) == "hard":
                                 continue
                             try:
                                 st = os.stat(fp_norm)
@@ -1167,10 +1510,34 @@ if True:
             return snap
 
         def _run_polling(self, stop_event, ctx_provider: Optional[Any] = None) -> None:
+            vol_mgr = self._volume_manager
+            if vol_mgr:
+                try:
+                    vol_mgr.sync_once()
+                    vol_mgr.start()
+                except Exception:
+                    pass
             self._snap = self._scan()
 
             while not stop_event.is_set():
                 time.sleep(self.poll_interval_sec)
+
+                if self._correlation_engine:
+                    for plan in self._correlation_engine.tick_flush(_now()):
+                        try:
+                            self._emit(
+                                self._build_event(
+                                    plan.evt_kind,
+                                    plan.src_path,
+                                    plan.dst_path,
+                                    plan.ctx,
+                                    correlation_action=plan.correlation_action,
+                                    correlation_detail=plan.correlation_detail,
+                                    skip_dedup=True,
+                                )
+                            )
+                        except RuntimeError:
+                            pass
 
                 cur = self._scan()
                 prev = self._snap
@@ -1186,23 +1553,19 @@ if True:
                 ctx = self._ctx_snapshot(ctx_provider)
 
                 for p in created:
-                    try:
-                        self._emit(self._build_event("created", p, None, ctx))
-                    except RuntimeError:
-                        continue
+                    self._ingest_fs_event("created", p, None, ctx)
 
                 for p in deleted:
-                    try:
-                        self._emit(self._build_event("deleted", p, None, ctx))
-                    except RuntimeError:
-                        continue
+                    self._ingest_fs_event("deleted", p, None, ctx)
 
                 for p in common:
                     if (cur[p].mtime != prev[p].mtime) or (cur[p].size != prev[p].size):
-                        try:
-                            self._emit(self._build_event("modified", p, None, ctx))
-                        except RuntimeError:
-                            continue
+                        self._ingest_fs_event("modified", p, None, ctx)
+            if vol_mgr:
+                try:
+                    vol_mgr.stop()
+                except Exception:
+                    pass
 
         def run_loop(self, stop_event, ctx_provider: Optional[Any] = None) -> None:
             if not self.watch_paths:

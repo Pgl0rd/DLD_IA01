@@ -112,6 +112,18 @@ class RiskScoringEngine:
                 'details': {...}
             }
         """
+        # CVSS-inspired DLP (Noteupdate.txt)
+        if str(self.method).lower() == 'cvss_dlp':
+            from core.cvss_dlp_orchestrator import CVSSDLPScoringEngine
+
+            if getattr(self, '_cvss_dlp_engine', None) is None:
+                self._cvss_dlp_engine = CVSSDLPScoringEngine()
+            return self._cvss_dlp_engine.calculate_score(
+                fast_scan_result,
+                deep_analysis_result,
+                event_context,
+            )
+
         # Use research-based method if configured
         if self.method == 'research_based' and self.research_engine:
             return self.research_engine.calculate_score(

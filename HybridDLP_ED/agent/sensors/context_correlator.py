@@ -876,7 +876,14 @@ class ContextCorrelator:
                         out.append(self._make_corr(corr_raw, now_unix, add_to_staging=True))
                 return out
 
-            if etype in {"file_created", "file_moved", "file_modified", "file_copied", "file_renamed"} or op_type in {"file_create", "file_move", "file_rename", "file_copy"}:
+            if etype in {"file_created", "file_moved", "file_modified", "file_copied", "file_renamed"} or op_type in {
+                "file_create",
+                "file_move",
+                "file_rename",
+                "file_copy",
+                "file_copy_external",
+                "file_move_external",
+            }:
                 ext = _evt_ext(evt).lower()
                 path = _evt_path(evt)
                 candidate = _evt_dst_path(evt) or path
@@ -1171,7 +1178,15 @@ class ContextCorrelator:
                         out.append(self._make_corr(corr_raw, now_unix))
 
             fileish_evt = etype in ("file_created", "file_modified", "file_moved", "file_copied", "file_renamed")
-            fileish_op = op_type in ("file_create", "file_modify", "file_move", "file_copy", "file_rename")
+            fileish_op = op_type in (
+                "file_create",
+                "file_modify",
+                "file_move",
+                "file_copy",
+                "file_rename",
+                "file_copy_external",
+                "file_move_external",
+            )
             if fileish_evt or fileish_op:
                 path = _evt_path(evt)
                 dst_path = _evt_dst_path(evt)
