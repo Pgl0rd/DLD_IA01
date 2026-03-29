@@ -27,12 +27,13 @@ def decide_recommended_action(
     label = "log_only"
     action = "log"
 
+    # Dùng đúng alert_th (không nhân 0.75): trước đây mọi điểm >= 30 đã thành alert khi th=40.
     if final_risk < 30:
         label = "log_only"
         action = "log"
     elif final_risk < 50:
         label = "low_alert"
-        action = "alert" if final_risk >= alert_th * 0.75 else "log"
+        action = "alert" if final_risk >= alert_th else "log"
     elif final_risk < 70:
         label = "medium_alert_justify"
         action = "alert" if final_risk >= alert_th else "log"
@@ -45,7 +46,8 @@ def decide_recommended_action(
         if not block_unreachable and final_risk >= 95:
             action = "block"
 
-    if em_code == "A" and final_risk >= 45:
+    # Chỉ leo thang khi đã gần ngưỡng alert (tránh A do heuristic kênh quá nhạy).
+    if em_code == "A" and final_risk >= max(alert_th - 3.0, 48.0):
         action = "alert"
         if label == "log_only":
             label = "maturity_active_escalated"

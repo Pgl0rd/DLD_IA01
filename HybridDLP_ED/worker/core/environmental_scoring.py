@@ -37,7 +37,7 @@ def score_user_context(ctx: Dict[str, Any]) -> float:
     """0–100 — role/privilege ước lượng từ process / user string."""
     user = str(ctx.get("user") or "unknown").lower()
     proc = str(ctx.get("process_name") or "").lower()
-    s = 25.0
+    s = 18.0
     if any(x in proc for x in ("admin", "system", "root")):
         s += 35.0
     if user in {"system", "network service"}:
@@ -49,7 +49,7 @@ def score_time_context(ctx: Dict[str, Any]) -> float:
     """0–100 — ngoài giờ làm việc tăng điểm."""
     dt = _parse_ts(ctx)
     if dt is None:
-        return 30.0
+        return 18.0
     h = dt.hour
     wd = dt.weekday()
     if wd >= 5:
@@ -64,7 +64,7 @@ def score_time_context(ctx: Dict[str, Any]) -> float:
 def score_asset_context(ctx: Dict[str, Any]) -> float:
     """0–100 — crown-jewel path / sensitive folder."""
     loc = str(ctx.get("location", "")).lower()
-    s = 20.0
+    s = 12.0
     for folder in WorkerConfig.SENSITIVE_EXFIL_FOLDERS:
         if folder and folder in loc:
             s += 45.0
@@ -78,14 +78,14 @@ def score_destination_environmental(ctx: Dict[str, Any]) -> float:
     """0–100 — đích môi trường (khác channel maturity)."""
     dest = str(ctx.get("destination") or "").lower()
     if not dest:
-        return 20.0
+        return 12.0
     if any(k in dest for k in ("usb", "removable", "e:\\", "f:\\")):
         return 70.0
     if any(k in dest for k in ("http", "drive.google", "dropbox", "onedrive")):
         return 85.0
     if "\\\\" in dest:
         return 55.0
-    return 40.0
+    return 28.0
 
 
 def compute_environmental_score(event_context: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:

@@ -4,6 +4,7 @@ BaseScore = 0.35*ContentSensitivity + 0.25*DataCriticality + 0.25*BehaviorAnomal
 """
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, Tuple
 
 from loguru import logger
@@ -22,6 +23,28 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
 def _event_data(ctx: Dict[str, Any]) -> Dict[str, Any]:
     ed = ctx.get("_event_data")
     return ed if isinstance(ed, dict) else {}
+
+
+# Tránh false positive: "src" trong "...\source\...", "mat" trong "...information...".
+_STRICT_PATH_KEYWORDS = frozenset({"src", "hr", "mat"})
+
+
+def _path_keyword_hit(path: str, kw: str) -> bool:
+    """Khớp theo tên segment đường dẫn, không dùng substring trên cả chuỗi path."""
+    if not path or not kw:
+        return False
+    lowered = path.lower()
+    kw = kw.lower()
+    segments = [p for p in re.split(r"[\\/]+", lowered) if p]
+    for seg in segments:
+        base = seg.split(".", 1)[0]
+        if kw in _STRICT_PATH_KEYWORDS:
+            if base == kw or base.startswith(f"{kw}_") or base.endswith(f"_{kw}"):
+                return True
+            continue
+        if kw in base or base.startswith(f"{kw}_") or base.endswith(f"_{kw}"):
+            return True
+    return False
 
 
 def compute_content_sensitivity(
@@ -83,12 +106,12 @@ def compute_data_criticality(event_context: Dict[str, Any]) -> float:
 
     critical_kw = (
         "payroll", "salary", "luong", "hr", "nhansu", "contract", "hopdong",
-        "customer", "khachhang", "source", "src", "financial", "taichinh",
+        "customer", "khachhang", "src", "financial", "taichinh",
         "medical", "benhan", "secret", "confidential", "mat",
     )
-    s = 15.0
+    s = 5.0
     for kw in critical_kw:
-        if kw in path:
+        if _path_keyword_hit(path, kw):
             s += 18.0
     tags = _event_data(event_context).get("tags") or []
     if isinstance(tags, (list, tuple)):
@@ -103,7 +126,7 @@ def compute_behavior_anomaly(
     deep_analysis_result: Dict[str, Any],
 ) -> float:
     """0–100 — behavioral + UEBA."""
-    base = 10.0
+    base = 6.0
     boost = float(event_context.get("behavioral_risk_boost") or 0)
     base = _clamp(base + boost * 0.5)
 
@@ -112,7 +135,7 @@ def compute_behavior_anomaly(
         ml = float(deep_analysis_result.get("ml_anomaly_score") or 0.0)
 
     if event_context.get("ml_is_anomaly") or deep_analysis_result.get("ml_is_anomaly"):
-        ml = max(ml, 55.0)
+        ml = max(ml, 48.0)
 
     return _clamp(max(base, ml * 0.85))
 
@@ -124,7 +147,7 @@ def compute_confidence(
     """0–100 — độ tin cậy detection (YARA mạnh → cao)."""
     yara_n = len(fast_scan_result.get("yara_matches") or [])
     if yara_n == 0 and not fast_scan_result.get("is_suspicious"):
-        return 35.0
+        return 22.0
     if yara_n >= 3:
         return 92.0
     if yara_n >= 1:

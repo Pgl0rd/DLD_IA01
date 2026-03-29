@@ -6,6 +6,7 @@ Map: 0–24→U, 25–54→P, 55+→A; thiếu telemetry → X
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Dict, List, Tuple
 
 from loguru import logger
@@ -29,6 +30,17 @@ def _action_and_dest(ctx: Dict[str, Any]) -> Tuple[str, str]:
     return at, dest + " " + src
 
 
+def _whole_token(hay: str, token: str) -> bool:
+    """Khớp token tách biệt — tránh 'sync' trong 'async', 'mail' trong 'gmail'."""
+    if not hay or not token:
+        return False
+    return re.search(
+        r"(?<![a-z0-9])" + re.escape(token) + r"(?![a-z0-9])",
+        hay,
+        flags=re.IGNORECASE,
+    ) is not None
+
+
 def score_channel(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
     """Nhóm 1 — kênh exfil (Noteupdate §5.1)."""
     reasons: List[str] = []
@@ -47,10 +59,14 @@ def score_channel(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
     if any(x in at for x in ("upload", "browser", "http")) or "upload" in combined:
         s += 30
         reasons.append("channel_browser_upload")
-    if "email" in at or "smtp" in combined or "mail" in combined:
+    if "email" in at or "smtp" in combined or _whole_token(combined, "mail"):
         s += 30
         reasons.append("channel_email")
-    if "network" in combined or "cloud" in combined or "sync" in combined:
+    if (
+        _whole_token(combined, "network")
+        or _whole_token(combined, "cloud")
+        or _whole_token(combined, "sync")
+    ):
         s += 28
         reasons.append("channel_network_cloud")
 

@@ -116,7 +116,7 @@ class WorkerConfig:
     RISK_THRESHOLDS = {
         # System requirement: alert-only (no blocking). Keep key for compatibility but make it unreachable.
         'block': 10**9,
-        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 40.0, 40.0, 70.0),
+        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 52.0, 35.0, 80.0),
         'log': 0
     }
 
