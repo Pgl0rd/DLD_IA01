@@ -12,12 +12,12 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
 
 
-def _clamp_0_100(v: float) -> float:
+def _clamp_0_10(v: float) -> float:
     try:
         x = float(v)
     except (TypeError, ValueError):
         return 0.0
-    return min(100.0, max(0.0, x))
+    return min(10.0, max(0.0, x))
 
 
 def _safe_float(v: Any, default: float = 0.0) -> float:
@@ -29,9 +29,7 @@ def _safe_float(v: Any, default: float = 0.0) -> float:
 
 def normalize_anomaly_score(raw_value: Any) -> float:
     """
-    Normalize anomaly signal to [0,100] using configurable policy.
-    - percentile: robust clipping with P5/P95
-    - minmax: linear map with min/max
+    Normalize anomaly signal to [0,10] using configurable policy.
     """
     x = _safe_float(raw_value, 0.0)
     method = (WorkerConfig.ML_ANOMALY_NORM_METHOD or "percentile").lower()
@@ -44,29 +42,35 @@ def normalize_anomaly_score(raw_value: Any) -> float:
     if hi <= lo:
         lo, hi = -1.0, 1.0
     xc = min(max(x, lo), hi)
-    return _clamp_0_100(100.0 * (xc - lo) / (hi - lo))
+    return _clamp_0_10(10.0 * (xc - lo) / (hi - lo))
+
+
+def total_score_to_cvss10(total_score: float) -> float:
+    """Điểm tổng đã là thang 0–10 (đồng nhất CVSS Base)."""
+    try:
+        s = float(total_score)
+    except (TypeError, ValueError):
+        return 0.0
+    return round(min(10.0, max(0.0, s)), 1)
 
 
 def classify_risk_level(total_score: float) -> str:
     """
-    Ánh xạ điểm rủi ro tổng (0–100) sang mức: low | medium | high | critical.
-    Ngưỡng cấu hình trong WorkerConfig (RISK_LEVEL_*_MAX).
+    Ánh xạ điểm tổng 0–10 theo CVSS v3 Severity:
+    None (0), Low (0.1–3.9), Medium (4.0–6.9), High (7.0–8.9), Critical (9.0–10.0).
     """
     try:
         s = float(total_score)
     except (TypeError, ValueError):
+        return "none"
+    s = _clamp_0_10(s)
+    if s <= 0.0:
+        return "none"
+    if s < 4.0:
         return "low"
-    low_m = WorkerConfig.RISK_LEVEL_LOW_MAX
-    med_m = WorkerConfig.RISK_LEVEL_MEDIUM_MAX
-    high_m = WorkerConfig.RISK_LEVEL_HIGH_MAX
-    # Enforce monotonic bins to keep policy robust even if env is misconfigured.
-    if not (0 <= low_m < med_m < high_m <= 100):
-        low_m, med_m, high_m = 25.0, 50.0, 75.0
-    if s < low_m:
-        return "low"
-    if s < med_m:
+    if s < 7.0:
         return "medium"
-    if s < high_m:
+    if s < 9.0:
         return "high"
     return "critical"
 
@@ -81,13 +85,10 @@ class RiskScoringEngine:
         self.research_engine = ResearchBasedRiskScoringEngine() if self.method == 'research_based' else None
         self.nist_engine = NISTBasedRiskScoringEngine() if self.method == 'nist_based' else None
         logger.info(
-            "Risk policy loaded: method=%s, composite=%s, alert_threshold=%s, risk_bins=(%s,%s,%s)",
+            "Risk policy loaded: method=%s, composite=%s, alert_threshold=%s (thang 0–10)",
             self.method,
             WorkerConfig.RISK_COMPOSITE_MODEL,
             self.thresholds.get("alert"),
-            WorkerConfig.RISK_LEVEL_LOW_MAX,
-            WorkerConfig.RISK_LEVEL_MEDIUM_MAX,
-            WorkerConfig.RISK_LEVEL_HIGH_MAX,
         )
     
     def calculate_score(self, 
@@ -152,13 +153,13 @@ class RiskScoringEngine:
         # Get event data from context if available (for IOC hits)
         event_data = event_context.get('_event_data', {})
         
-        # 1) Content Score = Impact proxy (Sc in [0,100])
+        # 1) Content Score = Impact proxy (Sc in [0,10])
         content_score = self._calculate_content_score(
             fast_scan_result, 
             deep_analysis_result,
             event_data
         )
-        scores['content_score'] = _clamp_0_100(content_score)
+        scores['content_score'] = _clamp_0_10(content_score)
         details['content'] = {
             'yara_matches': len(fast_scan_result.get('yara_matches', [])),
             'encrypted_zip': fast_scan_result.get('is_encrypted_zip', False),
@@ -166,14 +167,14 @@ class RiskScoringEngine:
         }
         
         # 2) Behavior Score (Sb): blend action risk + anomaly
-        # Sb = min(100, S_action + beta * S_anomaly)
+        # Sb = min(10, S_action + beta * S_anomaly)
         behavior_base = self._calculate_behavior_score(event_context)
         ml_anomaly = _safe_float(event_context.get("ml_anomaly_score"), 0.0)
         if ml_anomaly <= 1.0 and _safe_float(deep_analysis_result.get("anomaly_score"), 0.0) != 0.0:
             # Backward compat path for raw anomaly signals.
             ml_anomaly = normalize_anomaly_score(deep_analysis_result.get("anomaly_score"))
         blend = WorkerConfig.ML_ANOMALY_BEHAVIOR_BLEND
-        behavior_score = _clamp_0_100(behavior_base + ml_anomaly * blend)
+        behavior_score = _clamp_0_10(behavior_base + ml_anomaly * blend)
         scores['behavior_score'] = behavior_score
         details['behavior'] = {
             'action_type': event_context.get('action_type', 'unknown'),
@@ -183,9 +184,9 @@ class RiskScoringEngine:
             'ml_anomaly_behavior_blend': blend,
         }
         
-        # 3) Context Score (Sx in [0,100])
+        # 3) Context Score (Sx in [0,10])
         context_score = self._calculate_context_score(event_context)
-        scores['context_score'] = _clamp_0_100(context_score)
+        scores['context_score'] = _clamp_0_10(context_score)
         details['context'] = {
             'user': event_context.get('user', 'unknown'),
             'time': event_context.get('time', 'unknown'),
@@ -211,23 +212,24 @@ class RiskScoringEngine:
         else:
             alpha = WorkerConfig.RISK_LIKELIHOOD_ALPHA
             impact = scores["content_score"]
-            likelihood = _clamp_0_100(alpha * scores["behavior_score"] + (1.0 - alpha) * scores["context_score"])
-            total_score = (impact * likelihood) / 100.0
+            likelihood = _clamp_0_10(alpha * scores["behavior_score"] + (1.0 - alpha) * scores["context_score"])
+            total_score = (impact * likelihood) / 10.0
             details["composite_model"] = {
                 "name": "nist_multiplicative",
                 "likelihood_alpha": alpha,
                 "impact": round(impact, 2),
                 "likelihood": round(likelihood, 2),
-                "formula": "risk=(impact*likelihood)/100",
+                "formula": "risk=(impact*likelihood)/10",
             }
         
         # Quyết định hành động
-        total_score = _clamp_0_100(total_score)
+        total_score = _clamp_0_10(total_score)
         action = self._determine_action(total_score)
         risk_level = classify_risk_level(total_score)
         
         return {
             'total_score': round(total_score, 2),
+            'cvss_score': total_score_to_cvss10(total_score),
             **scores,
             'action': action,
             'risk_level': risk_level,
@@ -296,7 +298,7 @@ class RiskScoringEngine:
             if re.search(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b', ocr_text):
                 score += 35
         
-        return min(score, 100)  # Cap at 100
+        return min(score / 10.0, 10.0)
     
     def _calculate_behavior_score(self, context: Dict[str, Any]) -> float:
         """Tính Behavior Score"""
@@ -393,7 +395,7 @@ class RiskScoringEngine:
         # if is_off_hours(time_str):
         #     score += 10
         
-        return min(score, 100)
+        return min(score / 10.0, 10.0)
     
     def _calculate_context_score(self, context: Dict[str, Any]) -> float:
         """Tính Context Score"""
@@ -485,7 +487,7 @@ class RiskScoringEngine:
         user = str(context.get('user', '')).lower()
         # TODO: Check if user is in sensitive role
         
-        return min(score, 100)
+        return min(score / 10.0, 10.0)
     
     def _determine_action(self, total_score: float) -> str:
         """Quyết định hành động dựa trên score"""
@@ -503,11 +505,7 @@ class ResearchBasedRiskScoringEngine:
     
     Formula: Total Risk Score = w₁×A + w₂×B + w₃×C + w₄×T + w₅×F
     Where:
-    - A = Anomaly Score (0-100)
-    - B = Behavioral Deviation Score (0-100)
-    - C = Content Sensitivity Score (0-100)
-    - T = Temporal Risk Score (0-100)
-    - F = Frequency Risk Score (0-100)
+    - A–F ∈ [0,10]
     """
     
     def __init__(self):
@@ -533,8 +531,8 @@ class ResearchBasedRiskScoringEngine:
                 'anomaly_score': 60,
                 'behavioral_deviation_score': 70,
                 'content_sensitivity_score': 80,
-                'temporal_risk_score': 30,
-                'frequency_risk_score': 40,
+                'temporal_risk_score': 3,
+                'frequency_risk_score': 4,
                 'action': 'alert',
                 'details': {...}
             }
@@ -614,6 +612,7 @@ class ResearchBasedRiskScoringEngine:
         
         return {
             'total_score': round(total_score, 2),
+            'cvss_score': total_score_to_cvss10(total_score),
             **scores,
             'action': action,
             'risk_level': risk_level,
@@ -637,7 +636,7 @@ class ResearchBasedRiskScoringEngine:
             ml_anomaly = deep_analysis.get("anomaly_score")
             score += normalize_anomaly_score(ml_anomaly)
         else:
-            score += _clamp_0_100(ml_anomaly)
+            score += _clamp_0_10(ml_anomaly)
         
         # Anomaly Boost from indicators
         anomaly_boost = 0
@@ -661,7 +660,7 @@ class ResearchBasedRiskScoringEngine:
         
         score += anomaly_boost
         
-        return min(score, 100)
+        return min(score, 100) / 10.0
     
     def _calculate_behavioral_deviation_score(self,
                                             context: Dict[str, Any],
@@ -673,8 +672,8 @@ class ResearchBasedRiskScoringEngine:
         # Get baseline for user (if available)
         baseline = self.user_baselines.get(user, {})
         if not baseline:
-            # No baseline available, return neutral score
-            return 50.0
+            # No baseline available, return neutral score (0–10)
+            return 5.0
         
         # Get current metrics from context
         current_metrics = {
@@ -703,7 +702,7 @@ class ResearchBasedRiskScoringEngine:
         else:
             deviation_score = 50 + (max_z_score * 10)
         
-        return min(max(deviation_score, 0), 100)
+        return min(max(deviation_score, 0), 100) / 10.0
     
     def _calculate_content_sensitivity_score(self,
                                             fast_scan: Dict[str, Any],
@@ -772,7 +771,7 @@ class ResearchBasedRiskScoringEngine:
             if re.search(r'\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b', ocr_text):
                 score += 30
         
-        return min(score, 100)
+        return min(score, 100) / 10.0
     
     def _calculate_temporal_risk_score(self, context: Dict[str, Any]) -> float:
         """
@@ -817,7 +816,7 @@ class ResearchBasedRiskScoringEngine:
         else:
             score = 0
         
-        return min(score, 100)
+        return min(score, 100) / 10.0
     
     def _calculate_frequency_risk_score(self, context: Dict[str, Any]) -> float:
         """
@@ -849,7 +848,7 @@ class ResearchBasedRiskScoringEngine:
             multiplier = self._get_frequency_multiplier(external_urls_24h)
             score += base_score * multiplier
         
-        return min(score, 100)
+        return min(score, 100) / 10.0
     
     def _get_frequency_multiplier(self, count: int) -> float:
         """Get frequency multiplier based on count"""
@@ -889,7 +888,7 @@ class NISTBasedRiskScoringEngine:
     - L: Likelihood (1–5), calculated as weighted sum of channel, behavior, protection, frequency
     - I: Impact (1–4), based on data sensitivity (Public, Internal, Confidential, Secret)
     
-    Final Risk Score = (L × I / (L_max × I_max)) × 100
+    Final Risk Score = (L × I / (L_max × I_max)) × 10
     """
     
     def __init__(self):
@@ -920,19 +919,17 @@ class NISTBasedRiskScoringEngine:
         file_protection_score = self._get_file_protection_score(event_context, fast_scan_result)
         frequency_score = self._get_frequency_score(event_context)
         
-        # UEBA ML Anomaly Score (0-100) -> normalize to 1-5 scale
+        # UEBA ML Anomaly Score (0-10) -> likelihood boost
         ml_anomaly_score = _safe_float(event_context.get("ml_anomaly_score"), 0.0)
         if ml_anomaly_score <= 1.0 and _safe_float(deep_analysis_result.get("anomaly_score"), 0.0) != 0.0:
             ml_anomaly_score = normalize_anomaly_score(deep_analysis_result.get("anomaly_score"))
         ml_is_anomaly = event_context.get("ml_is_anomaly", False)
         ml_likelihood_boost = 0.0
         if ml_is_anomaly and ml_anomaly_score > 0:
-            # Convert ML anomaly score (0-100) to likelihood boost (0-2 points)
-            # Uses configurable threshold from WorkerConfig
             boost_threshold = WorkerConfig.ML_ANOMALY_BOOST_THRESHOLD
             if ml_anomaly_score >= boost_threshold:
-                # Score 70-100 adds 0-2.0 to likelihood
-                ml_likelihood_boost = min(2.0, (ml_anomaly_score - boost_threshold) / (100.0 - boost_threshold) * 2.0)
+                span = max(10.0 - boost_threshold, 0.01)
+                ml_likelihood_boost = min(2.0, (ml_anomaly_score - boost_threshold) / span * 2.0)
             else:
                 ml_likelihood_boost = 0.0
         
@@ -956,17 +953,17 @@ class NISTBasedRiskScoringEngine:
         
         details["likelihood"] = round(likelihood, 2)
         
-        # 3) Raw risk và chuẩn hoá về 0–100
+        # 3) Raw risk và chuẩn hoá về 0–10
         risk_raw = likelihood * impact
         total_score = 0.0
         denom = self.max_values["likelihood_max"] * self.max_values["impact_max"]
         if denom > 0:
-            total_score = (risk_raw / denom) * 100.0
+            total_score = (risk_raw / denom) * 10.0
         
         # 4) Hard override: exfil từ sensitive folder → max score
         force_max = bool(event_context.get("force_max_risk", False))
         if force_max:
-            total_score = 100.0
+            total_score = 10.0
             action = "alert"
             details["force_max_risk"] = True
             details["force_max_risk_reason"] = event_context.get("force_max_risk_reason", "")
@@ -978,6 +975,7 @@ class NISTBasedRiskScoringEngine:
         
         return {
             "total_score": round(total_score, 2),
+            "cvss_score": total_score_to_cvss10(total_score),
             "likelihood": round(likelihood, 2),
             "impact": round(impact, 2),
             "risk_raw": round(risk_raw, 2),
@@ -1227,7 +1225,7 @@ class NISTBasedRiskScoringEngine:
         return 1.0
     
     def _determine_action(self, total_score: float) -> str:
-        """Quyết định action dựa trên Risk Score chuẩn hoá 0–100."""
+        """Quyết định action dựa trên Risk Score 0–10."""
         if total_score >= self.thresholds["alert"]:
             return "alert"
         return "log"

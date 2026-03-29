@@ -94,14 +94,21 @@ def load_data():
         st.error(f"Traceback: {traceback.format_exc()}")
         return pd.DataFrame()
 
-# ================= SEVERITY =================
+# ================= SEVERITY (risk_score thang 0–10 = CVSS Severity) =================
 def classify_severity(score):
-    if score >= 10:
-        return "High"
-    elif score >= 5:
-        return "Medium"
-    else:
+    try:
+        s = float(score)
+    except (TypeError, ValueError):
+        return "None"
+    if s <= 0:
+        return "None"
+    if s < 4.0:
         return "Low"
+    if s < 7.0:
+        return "Medium"
+    if s < 9.0:
+        return "High"
+    return "Critical"
 
 # ================= UI =================
 st.markdown('<div class="main-title">🛡️ HYBRID DLP - SECURITY CENTER</div>', unsafe_allow_html=True)
@@ -112,8 +119,7 @@ df = load_data()
 # ================= SIDEBAR =================
 st.sidebar.header("🔍 Bộ lọc")
 
-# Risk score range: 0-100 (not 0-20)
-risk_range = st.sidebar.slider("Risk Score", 0, 100, (0, 100))
+risk_range = st.sidebar.slider("Risk Score", 0.0, 10.0, (0.0, 10.0))
 
 action_filter = st.sidebar.multiselect(
     "Action",
@@ -140,7 +146,7 @@ col1, col2, col3, col4 = st.columns(4)
 
 col1.metric("📊 TỔNG SỰ KIỆN", len(df))
 col2.metric("✅ LOW", len(df[df["severity"] == "Low"]))
-col3.metric("🔥 HIGH", len(df[df["severity"] == "High"]))
+col3.metric("🔥 HIGH+", len(df[df["severity"].isin(["High", "Critical"])]))
 col4.metric("🕒 UPDATE", datetime.now().strftime("%H:%M:%S"))
 
 st.divider()

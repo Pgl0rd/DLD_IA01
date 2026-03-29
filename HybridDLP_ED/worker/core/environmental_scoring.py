@@ -34,58 +34,58 @@ def _parse_ts(ctx: Dict[str, Any]) -> datetime | None:
 
 
 def score_user_context(ctx: Dict[str, Any]) -> float:
-    """0–100 — role/privilege ước lượng từ process / user string."""
+    """0–10 — role/privilege ước lượng từ process / user string."""
     user = str(ctx.get("user") or "unknown").lower()
     proc = str(ctx.get("process_name") or "").lower()
-    s = 18.0
+    s = 1.8
     if any(x in proc for x in ("admin", "system", "root")):
-        s += 35.0
+        s += 3.5
     if user in {"system", "network service"}:
-        s += 20.0
-    return min(100.0, s)
+        s += 2.0
+    return min(10.0, s)
 
 
 def score_time_context(ctx: Dict[str, Any]) -> float:
-    """0–100 — ngoài giờ làm việc tăng điểm."""
+    """0–10 — ngoài giờ làm việc tăng điểm."""
     dt = _parse_ts(ctx)
     if dt is None:
-        return 18.0
+        return 1.8
     h = dt.hour
     wd = dt.weekday()
     if wd >= 5:
-        return 75.0
+        return 7.5
     if h < 7 or h >= 20:
-        return 65.0
+        return 6.5
     if h < 8 or h >= 19:
-        return 45.0
-    return 15.0
+        return 4.5
+    return 1.5
 
 
 def score_asset_context(ctx: Dict[str, Any]) -> float:
-    """0–100 — crown-jewel path / sensitive folder."""
+    """0–10 — crown-jewel path / sensitive folder."""
     loc = str(ctx.get("location", "")).lower()
-    s = 12.0
+    s = 1.2
     for folder in WorkerConfig.SENSITIVE_EXFIL_FOLDERS:
         if folder and folder in loc:
-            s += 45.0
+            s += 4.5
             break
     if ctx.get("force_max_risk"):
-        s = max(s, 90.0)
-    return min(100.0, s)
+        s = max(s, 9.0)
+    return min(10.0, s)
 
 
 def score_destination_environmental(ctx: Dict[str, Any]) -> float:
-    """0–100 — đích môi trường (khác channel maturity)."""
+    """0–10 — đích môi trường (khác channel maturity)."""
     dest = str(ctx.get("destination") or "").lower()
     if not dest:
-        return 12.0
+        return 1.2
     if any(k in dest for k in ("usb", "removable", "e:\\", "f:\\")):
-        return 70.0
+        return 7.0
     if any(k in dest for k in ("http", "drive.google", "dropbox", "onedrive")):
-        return 85.0
+        return 8.5
     if "\\\\" in dest:
-        return 55.0
-    return 28.0
+        return 5.5
+    return 2.8
 
 
 def compute_environmental_score(event_context: Dict[str, Any]) -> Tuple[float, Dict[str, float]]:
@@ -101,7 +101,7 @@ def compute_environmental_score(event_context: Dict[str, Any]) -> Tuple[float, D
     d = score_destination_environmental(event_context)
 
     env = w["user"] * u + w["time"] * t + w["asset"] * a + w["destination"] * d
-    env = max(0.0, min(100.0, env))
+    env = max(0.0, min(10.0, env))
     parts = {
         "user_context": round(u, 2),
         "time_context": round(t, 2),

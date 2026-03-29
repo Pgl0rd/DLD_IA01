@@ -12,7 +12,7 @@ from .feature_extractor import EventFeatureExtractor
 
 def _normalize_anomaly_raw(raw_score: float) -> float:
     """
-    Normalize IsolationForest raw decision score to [0,100] using configurable policy.
+    Normalize IsolationForest raw decision score to [0,10] (cùng thang risk score).
     """
     from config import WorkerConfig
     method = (WorkerConfig.ML_ANOMALY_NORM_METHOD or "percentile").lower()
@@ -25,7 +25,7 @@ def _normalize_anomaly_raw(raw_score: float) -> float:
     if hi <= lo:
         lo, hi = -1.0, 1.0
     x = min(max(float(raw_score), lo), hi)
-    return max(0.0, min(100.0, (x - lo) / (hi - lo) * 100.0))
+    return max(0.0, min(10.0, (x - lo) / (hi - lo) * 10.0))
 
 
 class BehavioralMLAnalyzer:
@@ -87,7 +87,7 @@ class BehavioralMLAnalyzer:
         
         Returns:
             Dictionary with:
-            - anomaly_score: float [0, 100] (higher = more anomalous)
+            - anomaly_score: float [0, 10] (higher = more anomalous)
             - is_anomaly: bool
             - features: numpy array
         """
@@ -118,7 +118,7 @@ class BehavioralMLAnalyzer:
             # Isolation Forest returns: -1 (anomaly) to 1 (normal)
             raw_score = self.model.decision_function(features_2d)[0]
             
-            # Calibrated to [0,100] with configured normalization policy.
+            # Calibrated to [0,10] with configured normalization policy.
             anomaly_score = _normalize_anomaly_raw(raw_score)
             
             # Threshold: score > threshold is considered anomaly (configurable)

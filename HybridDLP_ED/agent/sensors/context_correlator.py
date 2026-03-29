@@ -158,6 +158,8 @@ def _iso_from_ts(ts: Any) -> str:
 
 def _sev(level: str) -> int:
     lv = str(level or "").strip().lower()
+    if lv in {"none", "null", ""}:
+        return 0
     if lv in {"critical", "crit"}:
         return 90
     if lv in {"high", "error"}:

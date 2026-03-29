@@ -112,38 +112,38 @@ class WorkerConfig:
     ML_CONFIDENCE_THRESHOLD = 0.7
     ML_MAX_TEXT_LENGTH = 10000  # Max characters để đọc từ file
     
-    # Risk Scoring
+    # Risk Scoring — toàn bộ điểm trên thang 0–10 (cùng ý nghĩa CVSS Base 0–10)
+    RISK_SCORE_MAX = 10.0
     RISK_THRESHOLDS = {
         # System requirement: alert-only (no blocking). Keep key for compatibility but make it unreachable.
         'block': 10**9,
-        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 52.0, 35.0, 80.0),
+        # CVSS > 3.9 cần xử lý ⇒ mặc định 4.0
+        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 4.0, 3.0, 8.5),
         'log': 0
     }
 
-    # Phân loại mức độ rủi ro trên thang điểm tổng 0–100 (điều chỉnh được qua biến môi trường)
-    # low: [0, low_max), medium: [low_max, medium_max), high: [medium_max, high_max), critical: [high_max, 100]
-    RISK_LEVEL_LOW_MAX = _env_float_bounded("RISK_LEVEL_LOW_MAX", 25.0, 10.0, 40.0)
-    RISK_LEVEL_MEDIUM_MAX = _env_float_bounded("RISK_LEVEL_MEDIUM_MAX", 50.0, 30.0, 70.0)
-    RISK_LEVEL_HIGH_MAX = _env_float_bounded("RISK_LEVEL_HIGH_MAX", 75.0, 55.0, 95.0)
+    # Ranh giới trên thang 0–10: Low <4, Medium 4–6.9, High 7–8.9, Critical ≥9
+    RISK_LEVEL_LOW_MAX = 4.0
+    RISK_LEVEL_MEDIUM_MAX = 7.0
+    RISK_LEVEL_HIGH_MAX = 9.0
     
-    # ML Anomaly Detection Thresholds
-    ML_ANOMALY_THRESHOLD = _env_float_bounded("ML_ANOMALY_THRESHOLD", 70.0, 40.0, 95.0)
-    ML_ANOMALY_BOOST_THRESHOLD = _env_float_bounded("ML_ANOMALY_BOOST_THRESHOLD", 70.0, 40.0, 95.0)
+    # ML Anomaly Detection Thresholds (cùng thang 0–10 với UEBA output)
+    ML_ANOMALY_THRESHOLD = _env_float_bounded("ML_ANOMALY_THRESHOLD", 7.0, 4.0, 9.5)
+    ML_ANOMALY_BOOST_THRESHOLD = _env_float_bounded("ML_ANOMALY_BOOST_THRESHOLD", 7.0, 4.0, 9.5)
 
-    # Phương pháp traditional: điểm anomaly UEBA (0–100) gộp vào Behavior score
-    # S_behavior = min(100, S_behavior^0 + β * S_anomaly), β = ML_ANOMALY_BEHAVIOR_BLEND
+    # Traditional: S_behavior = min(10, S_base + β * S_anomaly), S_anomaly ∈ [0,10]
     ML_ANOMALY_BEHAVIOR_BLEND = _env_float_bounded("ML_ANOMALY_BEHAVIOR_BLEND", 0.25, 0.0, 1.0)
     ML_ANOMALY_RISK_BOOST_FACTOR = _env_float_bounded("ML_ANOMALY_RISK_BOOST_FACTOR", 0.0, 0.0, 1.0)
 
     # Composite model for final risk:
     # - "weighted_sum": R = wc*Sc + wb*Sb + wx*Sx
-    # - "nist_multiplicative": Impact=Sc, Likelihood=alpha*Sb + (1-alpha)*Sx, R=(Impact*Likelihood)/100
+    # - "nist_multiplicative": Impact=Sc, Likelihood=alpha*Sb + (1-alpha)*Sx, R=(Impact*Likelihood)/10
     RISK_COMPOSITE_MODEL = os.getenv("RISK_COMPOSITE_MODEL", "nist_multiplicative").strip().lower()
     RISK_LIKELIHOOD_ALPHA = _env_float_bounded("RISK_LIKELIHOOD_ALPHA", 0.6, 0.0, 1.0)
 
     # Anomaly normalization policy for raw anomaly signal (if any):
-    # - "percentile": robust clipping with p5/p95 then map to [0,100]
-    # - "minmax": min-max map to [0,100]
+    # - "percentile": robust clipping with p5/p95 then map to [0,10]
+    # - "minmax": min-max map to [0,10]
     ML_ANOMALY_NORM_METHOD = os.getenv("ML_ANOMALY_NORM_METHOD", "percentile").strip().lower()
     ML_ANOMALY_P5 = _env_float("ML_ANOMALY_P5", -0.6)
     ML_ANOMALY_P95 = _env_float("ML_ANOMALY_P95", 0.6)
@@ -152,9 +152,9 @@ class WorkerConfig:
     
     # Behavioral Risk Boost Values
     BEHAVIORAL_RISK_BOOST = {
-        'high': 40,    # Lowered from 50 to 40
-        'medium': 25,  # Lowered from 30 to 25
-        'low': 8       # Lowered from 10 to 8
+        'high': 4.0,
+        'medium': 2.5,
+        'low': 0.8,
     }
     
     RISK_WEIGHTS = {
@@ -181,7 +181,7 @@ class WorkerConfig:
         'frequency': 0.1         # Frequency of risky actions
     }
     
-    # Max values for normalization when mapping R = L * I to 0-100
+    # Max values for normalization when mapping R = L * I to 0–10
     NIST_MAX_VALUES = {
         'likelihood_max': 5.0,   # Max L on 1–5 scale
         'impact_max': 4.0        # Max I on 1–4 scale (Public→Secret)
@@ -203,10 +203,10 @@ class WorkerConfig:
         'environmental': _env_float('CVSS_DLP_F_ENV', 0.15),
     }
     CVSS_DLP_MATURITY_LEVEL_SCORES = {
-        'U': _env_float('CVSS_DLP_MAT_U', 20.0),
-        'P': _env_float('CVSS_DLP_MAT_P', 50.0),
-        'A': _env_float('CVSS_DLP_MAT_A', 85.0),
-        'X': _env_float('CVSS_DLP_MAT_X', 35.0),
+        'U': _env_float('CVSS_DLP_MAT_U', 2.0),
+        'P': _env_float('CVSS_DLP_MAT_P', 5.0),
+        'A': _env_float('CVSS_DLP_MAT_A', 8.5),
+        'X': _env_float('CVSS_DLP_MAT_X', 3.5),
     }
     CVSS_DLP_EM_FACTORS = {
         'U': _env_float('CVSS_DLP_EMF_U', 0.85),

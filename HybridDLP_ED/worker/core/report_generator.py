@@ -292,11 +292,11 @@ class ReportGenerator:
         is_sensitive_location = any(loc in path_lower for loc in sensitive_locations)
         
         # Decision logic
-        if has_high_risk_pattern or (is_sensitive_ml and ml_confidence > 0.8) or risk_score >= 70:
+        if has_high_risk_pattern or (is_sensitive_ml and ml_confidence > 0.8) or risk_score >= 7.0:
             if is_sensitive_location:
                 return 'Highly Sensitive'
             return 'Sensitive'
-        elif is_sensitive_ml or risk_score >= 50 or len(yara_matches) > 0:
+        elif is_sensitive_ml or risk_score >= 4.0 or len(yara_matches) > 0:
             return 'Sensitive'
         elif is_sensitive_location:
             return 'Sensitive'

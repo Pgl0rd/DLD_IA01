@@ -1,6 +1,6 @@
 """
-Final Risk Fusion — Noteupdate §4 (công thức 2 khuyến nghị).
-FinalRisk = min(100, 0.60*BaseScore + 0.25*MaturityNumeric + 0.15*EnvironmentalScore + AttackChainBonus)
+Final Risk Fusion — Noteupdate §4 (công thức 2 khuyến nghị), thang 0–10.
+FinalRisk = min(10, 0.60*BaseScore + 0.25*MaturityNumeric + 0.15*EnvironmentalScore + AttackChainBonus)
 """
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ def fuse_final_risk(
     use_em_factor_on_base: bool = False,
 ) -> float:
     """
-    use_em_factor_on_base: nếu True, áp dụng công thức 1 min(100, Base*EM_Factor + Env*0.3 + Chain).
+    use_em_factor_on_base: nếu True, áp dụng công thức 1 min(10, Base*EM_Factor + Env*0.3 + Chain).
     Mặc định False — dùng công thức 2 trong Noteupdate.
     """
     fw = getattr(WorkerConfig, "CVSS_DLP_FUSION_WEIGHTS", None) or {
@@ -32,10 +32,10 @@ def fuse_final_risk(
         "maturity": 0.25,
         "environmental": 0.15,
     }
-    b = max(0.0, min(100.0, float(base_score)))
-    m = max(0.0, min(100.0, float(maturity_numeric)))
-    e = max(0.0, min(100.0, float(environmental_score)))
-    chain = max(0.0, min(20.0, float(attack_chain_bonus)))
+    b = max(0.0, min(10.0, float(base_score)))
+    m = max(0.0, min(10.0, float(maturity_numeric)))
+    e = max(0.0, min(10.0, float(environmental_score)))
+    chain = max(0.0, min(2.0, float(attack_chain_bonus)))
 
     if use_em_factor_on_base:
         adj_base = b * float(em_factor)
@@ -48,7 +48,7 @@ def fuse_final_risk(
             + chain
         )
 
-    total = max(0.0, min(100.0, total))
+    total = max(0.0, min(10.0, total))
     logger.debug(
         f"CVSS-DLP Fusion: base={b:.1f} mat={m:.1f} env={e:.1f} chain={chain:.1f} => {total:.1f}"
     )
@@ -58,7 +58,7 @@ def fuse_final_risk(
 def apply_force_max_risk(
     total: float,
     event_context: Dict[str, Any],
-    floor: float = 88.0,
+    floor: float = 8.8,
 ) -> tuple[float, bool]:
     if event_context.get("force_max_risk"):
         return max(total, floor), True

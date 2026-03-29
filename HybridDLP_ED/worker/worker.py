@@ -312,11 +312,11 @@ class DetectionEngine:
             # Bridge UEBA output into deep_analysis payload for scoring engines that
             # still read anomaly info from deep_analysis.
             try:
-                ml_score_0_100 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
-                deep_analysis_result['ml_anomaly_score'] = ml_score_0_100
+                ml_score_0_10 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = ml_score_0_10
                 deep_analysis_result['ml_is_anomaly'] = bool(ml_anomaly_result.get('is_anomaly', False))
                 # ResearchBasedRiskScoringEngine expects anomaly_score roughly in [-1, 1].
-                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_100 / 50.0) - 1.0))
+                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_10 / 5.0) - 1.0))
             except Exception:
                 pass
             
@@ -392,7 +392,9 @@ class DetectionEngine:
             
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:
-                risk_result['total_score'] = min(100, risk_result['total_score'] + behavioral_risk_boost)
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
+                if "cvss_score" in risk_result:
+                    risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
                 risk_result['details']['behavioral'] = behavioral_details
                 # Nếu behavioral rule match + high severity → force alert/block
                 highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
@@ -715,7 +717,9 @@ class DetectionEngine:
             
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:
-                risk_result['total_score'] = min(100, risk_result['total_score'] + behavioral_risk_boost)
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
+                if "cvss_score" in risk_result:
+                    risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
                 risk_result['details']['behavioral'] = behavioral_details
                 # Nếu behavioral rule match + high severity → force alert/block
                 highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
@@ -827,10 +831,10 @@ class DetectionEngine:
                 except Exception as e:
                     logger.error(f"Error in ML anomaly detection (special event): {e}")
             try:
-                ml_score_0_100 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
-                deep_analysis_result['ml_anomaly_score'] = ml_score_0_100
+                ml_score_0_10 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = ml_score_0_10
                 deep_analysis_result['ml_is_anomaly'] = bool(ml_anomaly_result.get('is_anomaly', False))
-                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_100 / 50.0) - 1.0))
+                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_10 / 5.0) - 1.0))
             except Exception:
                 pass
             
@@ -866,7 +870,9 @@ class DetectionEngine:
             
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:
-                risk_result['total_score'] = min(100, risk_result['total_score'] + behavioral_risk_boost)
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
+                if "cvss_score" in risk_result:
+                    risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
                 risk_result['details']['behavioral'] = behavioral_details
                 
                 highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
@@ -875,8 +881,8 @@ class DetectionEngine:
                         risk_result['action'] = 'alert'
                         
             # Cố định luôn đối với corr_* event
-            if event_type.startswith('corr_') and risk_result['total_score'] < 50:
-                risk_result['total_score'] = 75.0
+            if event_type.startswith('corr_') and risk_result['total_score'] < 5.0:
+                risk_result['total_score'] = 7.5
                 risk_result['action'] = 'alert'
             
             # 3. Generate Report Fields

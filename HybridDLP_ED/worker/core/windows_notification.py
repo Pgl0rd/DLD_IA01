@@ -163,7 +163,7 @@ class WindowsNotification:
                     rules = [m.get('rule', '') for m in matches[:3]]
                     message_parts.append(f"Phát hiện: {', '.join(rules)}")
             if details.get('risk_score'):
-                message_parts.append(f"Độ nguy hiểm: {details['risk_score']:.1f}/100")
+                message_parts.append(f"Độ nguy hiểm: {details['risk_score']:.1f}/10")
         
         message_parts.extend([
             "",

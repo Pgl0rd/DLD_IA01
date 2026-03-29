@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
 
 
-def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
+def _clamp(v: float, lo: float = 0.0, hi: float = 10.0) -> float:
     return max(lo, min(hi, float(v)))
 
 
@@ -52,52 +52,52 @@ def compute_content_sensitivity(
     deep_analysis_result: Dict[str, Any],
     event_context: Dict[str, Any],
 ) -> float:
-    """0–100 từ YARA, IOC, deep is_sensitive."""
+    """0–10 từ YARA, IOC, deep is_sensitive."""
     score = 0.0
     event_data = _event_data(event_context)
 
     for match in fast_scan_result.get("yara_matches") or []:
         rule = str(match.get("rule", "")).lower()
         if any(k in rule for k in ("id", "cmnd", "cccd")):
-            score += 50
+            score += 5.0
         elif "credit" in rule or "card" in rule:
-            score += 40
+            score += 4.0
         elif "api" in rule or "key" in rule:
-            score += 35
+            score += 3.5
         elif "email" in rule:
-            score += 20
+            score += 2.0
         elif "phone" in rule:
-            score += 15
+            score += 1.5
         else:
-            score += 28
+            score += 2.8
 
     for ioc in event_data.get("ioc_hits") or []:
         if not isinstance(ioc, dict):
             continue
         tag = str(ioc.get("tag", "")).lower()
         if "id" in tag or "cmnd" in tag:
-            score += 45
+            score += 4.5
         elif "credit" in tag or "card" in tag:
-            score += 38
+            score += 3.8
         elif "email" in tag:
-            score += 22
+            score += 2.2
         elif "phone" in tag:
-            score += 12
+            score += 1.2
         else:
-            score += 20
+            score += 2.0
 
     if deep_analysis_result.get("is_sensitive"):
-        score += 25
+        score += 2.5
     if fast_scan_result.get("is_encrypted_zip"):
-        score += 15
+        score += 1.5
     if fast_scan_result.get("is_suspicious"):
-        score += 10
+        score += 1.0
 
     return _clamp(score)
 
 
 def compute_data_criticality(event_context: Dict[str, Any]) -> float:
-    """0–100 — giá trị kinh doanh ước lượng từ path / tags."""
+    """0–10 — giá trị kinh doanh ước lượng từ path / tags."""
     loc = str(event_context.get("location", "")).lower()
     obj = _event_data(event_context).get("object")
     path = loc
@@ -109,15 +109,15 @@ def compute_data_criticality(event_context: Dict[str, Any]) -> float:
         "customer", "khachhang", "src", "financial", "taichinh",
         "medical", "benhan", "secret", "confidential", "mat",
     )
-    s = 5.0
+    s = 0.5
     for kw in critical_kw:
         if _path_keyword_hit(path, kw):
-            s += 18.0
+            s += 1.8
     tags = _event_data(event_context).get("tags") or []
     if isinstance(tags, (list, tuple)):
         for t in tags:
             if str(t).lower().startswith("corr_"):
-                s += 8.0
+                s += 0.8
     return _clamp(s)
 
 
@@ -125,8 +125,8 @@ def compute_behavior_anomaly(
     event_context: Dict[str, Any],
     deep_analysis_result: Dict[str, Any],
 ) -> float:
-    """0–100 — behavioral + UEBA."""
-    base = 6.0
+    """0–10 — behavioral + UEBA."""
+    base = 0.6
     boost = float(event_context.get("behavioral_risk_boost") or 0)
     base = _clamp(base + boost * 0.5)
 
@@ -135,7 +135,7 @@ def compute_behavior_anomaly(
         ml = float(deep_analysis_result.get("ml_anomaly_score") or 0.0)
 
     if event_context.get("ml_is_anomaly") or deep_analysis_result.get("ml_is_anomaly"):
-        ml = max(ml, 48.0)
+        ml = max(ml, 4.8)
 
     return _clamp(max(base, ml * 0.85))
 
@@ -144,17 +144,17 @@ def compute_confidence(
     fast_scan_result: Dict[str, Any],
     deep_analysis_result: Dict[str, Any],
 ) -> float:
-    """0–100 — độ tin cậy detection (YARA mạnh → cao)."""
+    """0–10 — độ tin cậy detection (YARA mạnh → cao)."""
     yara_n = len(fast_scan_result.get("yara_matches") or [])
     if yara_n == 0 and not fast_scan_result.get("is_suspicious"):
-        return 22.0
+        return 2.2
     if yara_n >= 3:
-        return 92.0
+        return 9.2
     if yara_n >= 1:
-        return 72.0
+        return 7.2
     if deep_analysis_result.get("is_sensitive"):
-        return 65.0
-    return 55.0
+        return 6.5
+    return 5.5
 
 
 def compute_base_score(

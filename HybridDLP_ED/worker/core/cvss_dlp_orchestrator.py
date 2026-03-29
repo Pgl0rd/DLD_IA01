@@ -72,7 +72,7 @@ class CVSSDLPScoringEngine:
         )
         reason_codes = [r for r in reason_codes if r]
 
-        from core.risk_scoring import classify_risk_level
+        from core.risk_scoring import classify_risk_level, total_score_to_cvss10
 
         cvss_payload = {
             "event_id": event_context.get("event_id"),
@@ -102,6 +102,7 @@ class CVSSDLPScoringEngine:
 
         return {
             "total_score": total,
+            "cvss_score": total_score_to_cvss10(total),
             "content_score": base_components["content_sensitivity"],
             "behavior_score": em["maturity_score"],
             "context_score": env_parts["environmental_score"],

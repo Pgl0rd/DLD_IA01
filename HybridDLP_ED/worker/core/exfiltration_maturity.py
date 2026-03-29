@@ -48,35 +48,35 @@ def score_channel(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
     s = 0.0
 
     if "usb" in at or "removable" in combined or "usb" in combined:
-        s += 20
+        s += 2.0
         reasons.append("channel_usb")
     if "clipboard" in at or "clipboard" in combined:
-        s += 10
+        s += 1.0
         reasons.append("channel_clipboard")
     if "print" in at:
-        s += 15
+        s += 1.5
         reasons.append("channel_print")
     if any(x in at for x in ("upload", "browser", "http")) or "upload" in combined:
-        s += 30
+        s += 3.0
         reasons.append("channel_browser_upload")
     if "email" in at or "smtp" in combined or _whole_token(combined, "mail"):
-        s += 30
+        s += 3.0
         reasons.append("channel_email")
     if (
         _whole_token(combined, "network")
         or _whole_token(combined, "cloud")
         or _whole_token(combined, "sync")
     ):
-        s += 28
+        s += 2.8
         reasons.append("channel_network_cloud")
 
     ev = _event_data(ctx)
     et = str(ev.get("type") or "").lower()
     if et.startswith("corr_") and "upload" in et:
-        s += 25
+        s += 2.5
         reasons.append("channel_correlated_upload")
 
-    return min(35.0, s), reasons
+    return min(3.5, s), reasons
 
 
 def score_concealment(fast_scan_result: Dict[str, Any], ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
@@ -84,20 +84,20 @@ def score_concealment(fast_scan_result: Dict[str, Any], ctx: Dict[str, Any]) -> 
     reasons: List[str] = []
     s = 0.0
     if fast_scan_result.get("is_encrypted_zip"):
-        s += 20
+        s += 2.0
         reasons.append("concealment_password_archive")
     ft = str(fast_scan_result.get("file_type") or "").lower()
     if "archive" in ft or "zip" in ft or "rar" in ft:
-        s += 10
+        s += 1.0
         reasons.append("concealment_archive")
     obj = _event_data(ctx).get("object")
     if isinstance(obj, dict):
         ext = str(obj.get("ext") or "").lower()
         name = str(obj.get("name") or "").lower()
         if ext in (".tmp", ".dat", ".bin") and any(c in name for c in (".doc", ".xls", ".pdf")):
-            s += 10
+            s += 1.0
             reasons.append("concealment_masquerade_ext")
-    return min(40.0, s), reasons
+    return min(4.0, s), reasons
 
 
 def score_volume(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
@@ -106,12 +106,12 @@ def score_volume(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
     s = 0.0
     mb = float(ctx.get("file_size_mb") or 0)
     if mb > 100:
-        s += 15
+        s += 1.5
         reasons.append("volume_large_file")
     elif mb > 50:
-        s += 8
+        s += 0.8
         reasons.append("volume_medium_file")
-    return min(25.0, s), reasons
+    return min(2.5, s), reasons
 
 
 def score_destination_ctx(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
@@ -123,12 +123,12 @@ def score_destination_ctx(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
         return 0.0, reasons
     external_kw = ("http", "https", "drive.google", "dropbox", "onedrive", "wetransfer", "mega", "telegram")
     if any(k in dest for k in external_kw):
-        s += 25
+        s += 2.5
         reasons.append("destination_confirmed_external")
     elif "\\\\" in dest or "//" in dest:
-        s += 12
+        s += 1.2
         reasons.append("destination_network_path")
-    return min(30.0, s), reasons
+    return min(3.0, s), reasons
 
 
 def score_anomaly_signal(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
@@ -136,16 +136,16 @@ def score_anomaly_signal(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
     reasons: List[str] = []
     s = 0.0
     ml = float(ctx.get("ml_anomaly_score") or 0.0)
-    if ml >= 70:
-        s += 20
+    if ml >= 7.0:
+        s += 2.0
         reasons.append("anomaly_high")
-    elif ml >= 40:
-        s += 10
+    elif ml >= 4.0:
+        s += 1.0
         reasons.append("anomaly_medium")
     if ctx.get("ml_is_anomaly"):
-        s = max(s, 15.0)
+        s = max(s, 1.5)
         reasons.append("anomaly_flag")
-    return min(25.0, s), reasons
+    return min(2.5, s), reasons
 
 
 def telemetry_insufficient(ctx: Dict[str, Any]) -> bool:
@@ -176,10 +176,10 @@ def compute_exfiltration_maturity(
     if unknown:
         em_code = "X"
         maturity_band = "unknown_telemetry"
-    elif raw_sum <= 24:
+    elif raw_sum <= 2.4:
         em_code = "U"
         maturity_band = "preliminary"
-    elif raw_sum <= 54:
+    elif raw_sum <= 5.4:
         em_code = "P"
         maturity_band = "suspicious_attempt"
     else:
@@ -187,12 +187,12 @@ def compute_exfiltration_maturity(
         maturity_band = "active_exfiltration"
 
     level_scores = getattr(WorkerConfig, "CVSS_DLP_MATURITY_LEVEL_SCORES", None) or {
-        "U": 20,
-        "P": 50,
-        "A": 85,
-        "X": 35,
+        "U": 2.0,
+        "P": 5.0,
+        "A": 8.5,
+        "X": 3.5,
     }
-    maturity_numeric = float(level_scores.get(em_code, 35))
+    maturity_numeric = float(level_scores.get(em_code, 3.5))
 
     em_factors = getattr(WorkerConfig, "CVSS_DLP_EM_FACTORS", None) or {
         "U": 0.85,
