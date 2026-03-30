@@ -24,6 +24,7 @@ class ActionExecutor:
         self.api_key = WorkerConfig.SERVER_API_KEY
         self.device_id = WorkerConfig.DEVICE_ID
         self.timeout = WorkerConfig.SERVER_TIMEOUT
+        self.windows_alert_min_score = float(getattr(WorkerConfig, "WINDOWS_ALERT_MIN_SCORE", 7.0))
         self.notification = WindowsNotification()
         
         # Dashboard alerts.json path
@@ -181,11 +182,17 @@ class ActionExecutor:
                 'file_path': str(file_path) if file_path and str(file_path) != 'clipboard://clipboard_content' else None
             }
             
-            # Hiển thị thông báo trên Windows
-            self.notification.show_violation_alert(
-                violation_type=violation_type,
-                details=notification_details
-            )
+            # Hiển thị popup Windows chỉ với mức rủi ro cao để tránh spam.
+            if float(risk_score) >= self.windows_alert_min_score:
+                self.notification.show_violation_alert(
+                    violation_type=violation_type,
+                    details=notification_details
+                )
+            else:
+                logger.info(
+                    f"[PID={pid}] Skip Windows popup (score={risk_score:.1f} < "
+                    f"threshold={self.windows_alert_min_score:.1f})"
+                )
             
             # Send alert to server với report fields
             self._send_to_server('alert', file_path, risk_score, details, context, report)
@@ -324,6 +331,26 @@ class ActionExecutor:
             True if saved successfully
         """
         try:
+            # Resolve filename/path from richest source first (event payload),
+            # then fallback to file_path argument.
+            ev = context.get("_event_data", {}) or {}
+            ev_obj = ev.get("object", {}) if isinstance(ev, dict) else {}
+            event_file_name = ""
+            event_file_path = ""
+            if isinstance(ev_obj, dict):
+                event_file_name = str(ev_obj.get("name") or "").strip()
+                event_file_path = str(
+                    ev_obj.get("path")
+                    or ev_obj.get("dst_path")
+                    or ev_obj.get("src_path")
+                    or ""
+                ).strip()
+            resolved_file_name = event_file_name or (
+                file_path.name if hasattr(file_path, "name") else ""
+            )
+            resolved_file_path = event_file_path or str(file_path or "")
+            is_clipboard_placeholder = str(file_path) == "clipboard://clipboard_content" if file_path else False
+
             # Extract keywords from YARA matches
             yara_matches = (
                 details.get('content', {}).get('yara_matches', []) or
@@ -357,10 +384,10 @@ class ActionExecutor:
             # Build alert entry
             alert_entry = {
                 'timestamp': timestamp,
-                'risk_score': int(risk_score),
+                'risk_score': round(float(risk_score), 2),
                 'action': action,
-                'file_path': str(file_path) if file_path and str(file_path) != 'clipboard://clipboard_content' else 'Clipboard Content',
-                'file_name': file_path.name if hasattr(file_path, 'name') and str(file_path) != 'clipboard://clipboard_content' else 'Clipboard',
+                'file_path': resolved_file_path if resolved_file_path and not is_clipboard_placeholder else 'Clipboard Content',
+                'file_name': resolved_file_name if resolved_file_name and not is_clipboard_placeholder else 'Clipboard',
                 'keywords': keywords,
                 'window_title': context.get('window_title') or context.get('active_window') or '',
                 'process_name': context.get('process_name') or '',

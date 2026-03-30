@@ -121,6 +121,8 @@ class WorkerConfig:
         'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 4.0, 3.0, 8.5),
         'log': 0
     }
+    # Chỉ hiện popup Windows khi risk đủ cao (giảm spam cảnh báo UI).
+    WINDOWS_ALERT_MIN_SCORE = _env_float_bounded("WINDOWS_ALERT_MIN_SCORE", 7.0, 0.0, 10.0)
 
     # Ranh giới trên thang 0–10: Low <4, Medium 4–6.9, High 7–8.9, Critical ≥9
     RISK_LEVEL_LOW_MAX = 4.0
