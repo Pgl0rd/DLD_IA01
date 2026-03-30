@@ -158,12 +158,11 @@ class DetectionEngine:
         fn_policy["file_name"] = file_name
 
         if key in self.LOW_MEDIUM_FILE_NAMES:
-            # Low -> medium band on 0-10 scale.
-            adjusted = max(2.5, min(float(risk_result.get("total_score", 0.0)), 5.5))
+            # Force low/medium but always below alert threshold to avoid warning spam.
+            adjusted = max(2.0, min(float(risk_result.get("total_score", 0.0)), 3.9))
             risk_result["total_score"] = round(adjusted, 2)
             risk_result["risk_level"] = "low" if adjusted < 4.0 else "medium"
-            if adjusted < WorkerConfig.RISK_THRESHOLDS["alert"]:
-                risk_result["action"] = "log"
+            risk_result["action"] = "log"
             risk_result["cvss_score"] = round(adjusted, 2)
             fn_policy["policy"] = "force_low_medium"
         elif key in self.HIGH_RISK_FILE_NAMES:
