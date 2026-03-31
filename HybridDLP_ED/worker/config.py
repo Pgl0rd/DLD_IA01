@@ -197,6 +197,29 @@ class WorkerConfig:
     # Risk Scoring Method: mặc định 'cvss_dlp' (Noteupdate); có thể đổi: nist_based, traditional, research_based
     RISK_SCORING_METHOD = os.getenv('RISK_SCORING_METHOD', 'cvss_dlp').strip().lower()
 
+    # Clipboard tuning: tăng độ nhạy YARA cho luồng clipboard.
+    CLIPBOARD_YARA_WEIGHT_MULTIPLIER = _env_float_bounded(
+        "CLIPBOARD_YARA_WEIGHT_MULTIPLIER", 1.35, 1.0, 3.0
+    )
+    # Nếu clipboard paste có YARA match, ép score tối thiểu để luôn cảnh báo.
+    CLIPBOARD_YARA_MIN_ALERT_SCORE = _env_float_bounded(
+        "CLIPBOARD_YARA_MIN_ALERT_SCORE", 7.2, 0.0, 10.0
+    )
+    # Nếu có YARA match thuộc nhóm cực nhạy cảm (ID/CCCD/CMND/Credit/API key), ép ngưỡng cao hơn.
+    CLIPBOARD_HIGHLY_SENSITIVE_MIN_ALERT_SCORE = _env_float_bounded(
+        "CLIPBOARD_HIGHLY_SENSITIVE_MIN_ALERT_SCORE", 8.4, 0.0, 10.0
+    )
+    # Giảm trọng số "web nhạy cảm" để tránh over-score khi chỉ dựa vào title/domain.
+    SENSITIVE_WEB_BEHAVIOR_WEIGHT = _env_float_bounded(
+        "SENSITIVE_WEB_BEHAVIOR_WEIGHT", 0.6, 0.3, 1.0
+    )
+    SENSITIVE_WEB_CONTEXT_TITLE_POINTS = _env_float_bounded(
+        "SENSITIVE_WEB_CONTEXT_TITLE_POINTS", 12.0, 0.0, 25.0
+    )
+    SENSITIVE_WEB_CONTEXT_DOMAIN_POINTS = _env_float_bounded(
+        "SENSITIVE_WEB_CONTEXT_DOMAIN_POINTS", 12.0, 0.0, 25.0
+    )
+
     # --- CVSS-inspired DLP (Noteupdate.txt §3–§4) ---
     CVSS_DLP_BASE_WEIGHTS = {
         'content_sensitivity': _env_float('CVSS_DLP_W_CONTENT', 0.35),

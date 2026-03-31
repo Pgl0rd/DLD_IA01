@@ -1,74 +1,43 @@
-rule Financial_Data {
+rule Financial_Data_Vietnam_Optimized {
     meta:
-        description = "Detect financial data (amounts, balances, transactions)"
+        description = "Detects financial amounts, currency (VND/USD), and transaction documents"
         severity = "high"
-        author = "HybridDLP"
-    
+        author = "HybridDLP_Enhanced"
+        confidence = "high"
+
     strings:
-        // Large amounts with multiple comma separators (e.g., 1,500,000,000 VND)
-        // Pattern: matches numbers with 1-3 digits, followed by one or more groups of comma/dot + 3 digits
-        $amount_vnd1 = /\b[0-9]{1,3}([.,][0-9]{3})+\s*VND/i
-        $amount_vnd2 = /\b[0-9]{1,3}([.,][0-9]{3})+\s*đồng/i
-        $amount_vnd3 = /\b[0-9]{1,3}([.,][0-9]{3})+\s*vnđ/i
-        
-        // Large amounts without separators (e.g., 1500000000 VND)
-        $amount_vnd4 = /\b[0-9]{7,}\s*VND/i
-        
-        // Medium amounts with single separator (e.g., 1,000,000 VND or 500,000 VND)
-        $amount_vnd5 = /\b[0-9]{1,3}[.,][0-9]{3}\s*VND/i
-        $amount_vnd6 = /\b[0-9]{1,3}[.,][0-9]{3}\s*đồng/i
-        $amount_vnd7 = /\b[0-9]{1,3}[.,][0-9]{3}\s*vnđ/i
-        
-        // USD amounts
-        $amount_usd1 = /\$[0-9]{1,3}([.,][0-9]{3})+/
-        $amount_usd2 = /\$[0-9]{7,}/
-        $amount_usd3 = /\$[0-9]{1,3}[.,][0-9]{3}/
-        
-        // Financial keywords (Vietnamese)
-        $keyword1 = "doanh thu" nocase
-        $keyword2 = "lợi nhuận" nocase
-        $keyword3 = "chi phí" nocase
-        $keyword4 = "ngân sách" nocase
-        $keyword5 = "số dư" nocase
-        $keyword6 = "giao dịch" nocase
-        $keyword7 = "thanh toán" nocase
-        $keyword8 = "hóa đơn" nocase
-        $keyword9 = "báo cáo tài chính" nocase
-        $keyword10 = "báo cáo" nocase
-        $keyword11 = "tài chính" nocase
-        $keyword12 = "công ty" nocase
-        $keyword13 = "corporation" nocase
-        $keyword14 = "company" nocase
-        
-        // Financial keywords (English)
-        $keyword15 = "balance" nocase
-        $keyword16 = "revenue" nocase
-        $keyword17 = "profit" nocase
-        $keyword18 = "budget" nocase
-        $keyword19 = "transaction" nocase
-        $keyword20 = "payment" nocase
-        $keyword21 = "invoice" nocase
-        $keyword22 = "financial report" nocase
-        $keyword23 = "financial statement" nocase
-        $keyword24 = "income" nocase
-        $keyword25 = "expense" nocase
-        $keyword26 = "expenditure" nocase
-        $keyword27 = "cost" nocase
-    
+        // 1. Regex cho tiền tệ VND: Hỗ trợ 1.000.000, 1,000,000 hoặc 1000000 
+        // Hỗ trợ đơn vị: VND, VNĐ, đồng, đ.
+        $currency_vnd = /\b[0-9]{1,3}([.,][0-9]{3}){1,5}\s*(VND|VNĐ|đồng|đ)\b/i
+        $currency_vnd_plain = /\b[0-9]{7,15}\s*(VND|VNĐ|đồng|đ)\b/i
+
+        // 2. Regex cho tiền tệ USD: $1,000.00 hoặc $1000000
+        $currency_usd = /\$\s*[0-9]{1,3}([.,][0-9]{3}){0,5}([.,][0-9]{2})?\b/
+        $currency_usd_suffix = /\b[0-9]{1,3}([.,][0-9]{3}){0,5}\s*USD\b/i
+
+        // 3. Nhóm từ khóa hành động/đối tượng tài chính (Cần đi kèm số tiền)
+        $k_finance = /(doanh thu|lợi nhuận|chi phí|ngân sách|số dư|giao dịch|thanh toán|hóa đơn|tạm ứng|hoàn tiền|revenue|profit|budget|transaction|payment|invoice|balance|expenditure)/ nocase
+
+        // 4. Nhóm từ khóa định danh tài liệu (Đứng một mình cũng có nguy cơ)
+        $doc_high = /(báo cáo tài chính|financial report|financial statement|bảng cân đối kế toán|balance sheet|p&l statement)/ nocase
+
+        // 5. Loại trừ các trường hợp số phiên bản hoặc địa chỉ IP (Giảm False Positive)
+        $fp_ip = /\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b/
+
     condition:
-        // Match if has amount AND keyword (high confidence)
-        // OR match if has large amount (>= 7 digits) OR multiple separators
-        // OR match if has strong financial keyword (báo cáo tài chính, financial report, etc.)
+        // Case 1: Có từ khóa tài liệu quan trọng (Độ tin tưởng cao nhất)
+        any of ($doc_high) or
+
+        // Case 2: Có số tiền đi kèm với từ khóa tài chính trong cùng một vùng dữ liệu
         (
-            (
-                ($amount_vnd1 or $amount_vnd2 or $amount_vnd3 or $amount_vnd4 or $amount_vnd5 or $amount_vnd6 or $amount_vnd7 or $amount_usd1 or $amount_usd2 or $amount_usd3) and
-                ($keyword1 or $keyword2 or $keyword3 or $keyword4 or $keyword5 or $keyword6 or $keyword7 or $keyword8 or $keyword9 or $keyword10 or $keyword11 or $keyword12 or $keyword13 or $keyword14 or $keyword15 or $keyword16 or $keyword17 or $keyword18 or $keyword19 or $keyword20 or $keyword21 or $keyword22 or $keyword23 or $keyword24 or $keyword25 or $keyword26 or $keyword27)
-            ) or
-            // Large amounts with multiple separators (high value transactions)
-            ($amount_vnd1 or $amount_vnd2 or $amount_vnd3 or $amount_usd1) or
-            // Very large amounts without separators
-            ($amount_vnd4 or $amount_usd2) or
-            // Strong financial report keywords
-            ($keyword9 or $keyword22 or $keyword23)
+            (any of ($currency*)) and (any of ($k_finance))
+        ) or
+
+        // Case 3: Có ít nhất 3 cụm số tiền xuất hiện (Dấu hiệu của một bảng biểu/danh sách tài chính)
+        (
+            #currency_vnd > 3 or #currency_usd > 3
         )
+        
+        // Loại trừ IP để tránh bắt nhầm log server
+        and not $fp_ip
 }

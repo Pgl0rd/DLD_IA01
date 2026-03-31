@@ -463,6 +463,38 @@ class DetectionEngine:
                 deep_analysis_result,
                 event_context
             )
+
+            # Clipboard + YARA hits phải được ưu tiên cảnh báo.
+            if is_clipboard_paste and yara_matches:
+                rules_lower = [
+                    str(m.get("rule", "")).lower()
+                    for m in yara_matches
+                    if isinstance(m, dict)
+                ]
+                has_highly_sensitive_yara = any(
+                    any(k in r for k in ("id", "cmnd", "cccd", "credit", "card", "api", "key"))
+                    for r in rules_lower
+                )
+                min_clipboard_score = float(
+                    WorkerConfig.CLIPBOARD_HIGHLY_SENSITIVE_MIN_ALERT_SCORE
+                    if has_highly_sensitive_yara
+                    else WorkerConfig.CLIPBOARD_YARA_MIN_ALERT_SCORE
+                )
+                if risk_result.get("total_score", 0.0) < min_clipboard_score:
+                    risk_result["total_score"] = min_clipboard_score
+                    if "cvss_score" in risk_result:
+                        risk_result["cvss_score"] = round(min_clipboard_score, 2)
+
+                # Alert-only system: ensure alert action for clipboard sensitive leak.
+                risk_result["action"] = "alert"
+                risk_result.setdefault("details", {})
+                risk_result["details"]["clipboard_yara_override"] = {
+                    "applied": True,
+                    "is_clipboard_paste": True,
+                    "yara_matches": len(yara_matches),
+                    "highly_sensitive_yara": has_highly_sensitive_yara,
+                    "min_alert_score": min_clipboard_score,
+                }
             
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:

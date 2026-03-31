@@ -359,6 +359,9 @@ class RiskScoringEngine:
         
         # Check if sensitive title
         is_sensitive_title = any(keyword in window_title for keyword in sensitive_title_keywords)
+        sensitive_web_behavior_weight = float(
+            getattr(WorkerConfig, "SENSITIVE_WEB_BEHAVIOR_WEIGHT", 1.0)
+        )
         
         if is_clipboard_paste and (is_messaging_app or is_sensitive_app or is_sensitive_domain or is_sensitive_title):
             # Clipboard paste vào GPT/Discord/Zalo/Messaging App → rất nguy hiểm
@@ -366,7 +369,7 @@ class RiskScoringEngine:
                 score += 60  # Very high risk (desktop app)
                 logger.warning(f"VERY HIGH RISK: Clipboard paste to messaging app: {process_name}")
             else:
-                score += 50  # High risk behavior
+                score += 50 * sensitive_web_behavior_weight  # Reduced weight for sensitive web pages
                 logger.warning(f"HIGH RISK: Clipboard paste to sensitive app: {window_title} or domain: {domain}")
         
         # Clipboard paste (general)
@@ -459,12 +462,18 @@ class RiskScoringEngine:
         }
         
         # Check sensitive window title
+        sensitive_title_points = float(
+            getattr(WorkerConfig, "SENSITIVE_WEB_CONTEXT_TITLE_POINTS", 25.0)
+        )
         if any(keyword in window_title for keyword in sensitive_title_keywords):
-            score += 25  # High context risk
+            score += sensitive_title_points
         
         # Check sensitive domain
+        sensitive_domain_points = float(
+            getattr(WorkerConfig, "SENSITIVE_WEB_CONTEXT_DOMAIN_POINTS", 25.0)
+        )
         if domain in sensitive_domains:
-            score += 25  # High context risk
+            score += sensitive_domain_points
         
         # Check messaging app (desktop app)
         if any(app in process_name for app in messaging_apps):

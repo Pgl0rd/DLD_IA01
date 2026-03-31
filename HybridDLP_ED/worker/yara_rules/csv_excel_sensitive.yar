@@ -33,8 +33,6 @@ rule CSV_Excel_Sensitive_Data {
         $keyword8 = "profit" nocase
         $keyword9 = "phone" nocase
         $keyword10 = "contact" nocase
-        $keyword11 = "data" nocase
-        $keyword12 = "export" nocase
         
         // Keywords (Vietnamese)
         $keyword13 = "số điện thoại" nocase
@@ -43,15 +41,15 @@ rule CSV_Excel_Sensitive_Data {
         $keyword16 = "lợi nhuận" nocase
         $keyword17 = "khách hàng" nocase
         $keyword18 = "liên hệ" nocase
-        $keyword19 = "dữ liệu" nocase
-        $keyword20 = "xuất" nocase
     
     condition:
         // Match if CSV/Excel format AND contains sensitive data
         ($csv_indicator or $excel_indicator) and
-        (($cmnd or $cccd) and ($keyword1 or $keyword2)) or
-        ($phone and ($keyword3 or $keyword9 or $keyword13 or $keyword18)) or
-        ($email and ($keyword3 or $keyword10)) or
-        ($bank_account and ($keyword5 or $keyword6 or $keyword8 or $keyword9 or $keyword10 or $keyword14 or $keyword17)) or
-        (($amount1 or $amount2 or $amount3 or $amount4) and ($keyword6 or $keyword7 or $keyword15 or $keyword16))
+        (
+            (($cmnd or $cccd) and ($keyword1 or $keyword2)) or
+            ($phone and ($keyword3 or $keyword9 or $keyword13 or $keyword18)) or
+            ($email and ($keyword3 or $keyword10)) or
+            ($bank_account and ($keyword4 or $keyword5 or $keyword6 or $keyword8 or $keyword9 or $keyword10 or $keyword14 or $keyword17)) or
+            (($amount1 or $amount2 or $amount3 or $amount4) and ($keyword6 or $keyword7 or $keyword15 or $keyword16))
+        )
 }

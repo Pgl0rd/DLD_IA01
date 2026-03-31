@@ -38,8 +38,32 @@ class FastScanEngine:
                 existing_rules = {k: v for k, v in rule_files.items() if Path(v).exists()}
                 
                 if existing_rules:
-                    self.yara_rules = yara.compile(filepaths=existing_rules)
-                    logger.info(f"Loaded {len(existing_rules)} YARA rule files: {list(existing_rules.keys())}")
+                    valid_rules = {}
+                    invalid_rules = {}
+                    for rule_name, rule_path in existing_rules.items():
+                        try:
+                            # Validate each rule independently so one bad file
+                            # does not disable the entire YARA bundle.
+                            yara.compile(filepath=str(rule_path))
+                            valid_rules[rule_name] = rule_path
+                        except yara.Error as e:
+                            invalid_rules[rule_name] = str(e)
+                            logger.error(f"Invalid YARA rule skipped: {rule_path} | {e}")
+
+                    if valid_rules:
+                        self.yara_rules = yara.compile(filepaths=valid_rules)
+                        logger.info(
+                            f"Loaded {len(valid_rules)}/{len(existing_rules)} YARA rule files: "
+                            f"{list(valid_rules.keys())}"
+                        )
+                        if invalid_rules:
+                            logger.warning(
+                                f"Skipped {len(invalid_rules)} invalid YARA rules: "
+                                f"{list(invalid_rules.keys())}"
+                            )
+                    else:
+                        logger.error("No valid YARA rules available after validation")
+                        self.yara_rules = None
                 else:
                     logger.warning("No YARA rule files found")
                     self.yara_rules = None

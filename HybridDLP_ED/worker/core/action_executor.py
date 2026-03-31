@@ -30,7 +30,7 @@ class ActionExecutor:
         # Dashboard alerts.json path
         # In Docker: /app/logs/alerts.json (shared volume)
         # Local: dashboard/logs/alerts.json (relative to project root)
-        if Path("/app/logs").exists():
+        if os.name != "nt" and Path("/app/logs").exists():
             self.dashboard_log_path = Path("/app/logs/alerts.json")
             logger.info(f"[PID={os.getpid()}] Dashboard log path (Docker): {self.dashboard_log_path}")
         else:

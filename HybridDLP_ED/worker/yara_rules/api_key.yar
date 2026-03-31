@@ -66,6 +66,8 @@ rule API_Key {
         ($github_pat or $github_oauth or $github_user or $github_app or $github_refresh) or
         // Google keys
         ($google_api or $google_oauth) or
+        // Azure-like GUID secrets in key context
+        ($azure_key and ($keyword1 or $keyword3 or $keyword4 or $keyword9 or $keyword10 or $keyword11)) or
         // JWT tokens
         $jwt or
         // Database connection strings

@@ -62,6 +62,7 @@ rule Credit_Card_Single {
          ($amex1 or $amex2 or $amex3 or $amex4) or
          ($discover1 or $discover2 or $discover3) or
          $jcb or
-         ($diners1 or $diners2 or $diners3))
-        // Keywords optional but increase confidence
+         ($diners1 or $diners2 or $diners3)) and
+        // Keywords optional but still referenced to avoid dead strings
+        any of ($keyword*)
 }

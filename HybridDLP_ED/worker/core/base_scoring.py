@@ -55,21 +55,32 @@ def compute_content_sensitivity(
     """0–10 từ YARA, IOC, deep is_sensitive."""
     score = 0.0
     event_data = _event_data(event_context)
+    action_type = str(event_context.get("action_type") or "").lower()
+    source = str(event_context.get("source") or "").lower()
+    location = str(event_context.get("location") or "").lower()
+    is_clipboard_event = bool(event_context.get("is_clipboard_paste")) or any(
+        x in action_type for x in ("clipboard", "paste")
+    ) or "clipboard" in source or "clipboard" in location
+    yara_weight_multiplier = (
+        float(getattr(WorkerConfig, "CLIPBOARD_YARA_WEIGHT_MULTIPLIER", 1.0))
+        if is_clipboard_event
+        else 1.0
+    )
 
     for match in fast_scan_result.get("yara_matches") or []:
         rule = str(match.get("rule", "")).lower()
         if any(k in rule for k in ("id", "cmnd", "cccd")):
-            score += 5.0
+            score += 5.0 * yara_weight_multiplier
         elif "credit" in rule or "card" in rule:
-            score += 4.0
+            score += 4.0 * yara_weight_multiplier
         elif "api" in rule or "key" in rule:
-            score += 3.5
+            score += 3.5 * yara_weight_multiplier
         elif "email" in rule:
-            score += 2.0
+            score += 2.0 * yara_weight_multiplier
         elif "phone" in rule:
-            score += 1.5
+            score += 1.5 * yara_weight_multiplier
         else:
-            score += 2.8
+            score += 2.8 * yara_weight_multiplier
 
     for ioc in event_data.get("ioc_hits") or []:
         if not isinstance(ioc, dict):
