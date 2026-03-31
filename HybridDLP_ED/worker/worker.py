@@ -172,6 +172,35 @@ class DetectionEngine:
             risk_result["action"] = "alert"
             risk_result["cvss_score"] = round(float(risk_result["total_score"]), 2)
             fn_policy["policy"] = "force_high"
+
+    def _is_external_transfer_event(self, event: dict) -> bool:
+        operation = event.get("operation", {}) or {}
+        op_type = str(operation.get("op_type") or event.get("type") or "").lower()
+        obj = event.get("object", {}) or {}
+        dst_volume = str(
+            operation.get("dest_volume_type")
+            or obj.get("dest_volume_type")
+            or obj.get("volume_type")
+            or ""
+        ).lower()
+        semantic_hint = str(operation.get("dlp_semantic_hint") or "").lower()
+        semantic_action = str(operation.get("semantic_action") or "").lower()
+        return (
+            "external" in op_type
+            or "copy_to_removable" in semantic_action
+            or "external_transfer" in semantic_hint
+            or dst_volume in {"removable", "network"}
+        )
+
+    def _merge_fast_scan(self, base_result: dict, extra_result: dict) -> dict:
+        merged = dict(base_result or {})
+        base_matches = list((base_result or {}).get("yara_matches") or [])
+        extra_matches = list((extra_result or {}).get("yara_matches") or [])
+        merged["yara_matches"] = base_matches + extra_matches
+        merged["is_suspicious"] = bool((base_result or {}).get("is_suspicious")) or bool(
+            (extra_result or {}).get("is_suspicious")
+        )
+        return merged
     
     def process_event(self, event: dict) -> bool:
         """
@@ -311,13 +340,27 @@ class DetectionEngine:
                     return True
                 # Nếu cached là malicious, vẫn cần check lại (có thể policy thay đổi)
             
-            # 3. Fast Scan
+            # 3. Fast Scan (file content)
             fast_scan_result = self.fast_scan.scan_file(file_path, panic_mode)
+
+            # For USB/network copy events, also scan event text sample (if available),
+            # because some file signatures can be generic (e.g., csv detected as bin).
+            if self._is_external_transfer_event(event):
+                ev_content = event.get("content", {}) or {}
+                sample_text = str(ev_content.get("sample") or "").strip()
+                if sample_text:
+                    text_scan_result = self.fast_scan.scan_text_content(sample_text, panic_mode)
+                    fast_scan_result = self._merge_fast_scan(fast_scan_result, text_scan_result)
+                    logger.info(
+                        f"External transfer content-enriched scan: sample_len={len(sample_text)}, "
+                        f"yara_matches={len(fast_scan_result.get('yara_matches', []))}"
+                    )
             
+            yara_matches = fast_scan_result.get('yara_matches', [])
+
             # 4. Decision Point
             if fast_scan_result.get('is_suspicious', False):
                 # Nếu YARA phát hiện ngay với high confidence → có thể skip deep analysis
-                yara_matches = fast_scan_result.get('yara_matches', [])
                 if yara_matches and not panic_mode:
                     # Check nếu là high-risk rule (ID, credit card)
                     high_risk_rules = ['id', 'cmnd', 'cccd', 'credit', 'card']
@@ -464,38 +507,6 @@ class DetectionEngine:
                 event_context
             )
 
-            # Clipboard + YARA hits phải được ưu tiên cảnh báo.
-            if is_clipboard_paste and yara_matches:
-                rules_lower = [
-                    str(m.get("rule", "")).lower()
-                    for m in yara_matches
-                    if isinstance(m, dict)
-                ]
-                has_highly_sensitive_yara = any(
-                    any(k in r for k in ("id", "cmnd", "cccd", "credit", "card", "api", "key"))
-                    for r in rules_lower
-                )
-                min_clipboard_score = float(
-                    WorkerConfig.CLIPBOARD_HIGHLY_SENSITIVE_MIN_ALERT_SCORE
-                    if has_highly_sensitive_yara
-                    else WorkerConfig.CLIPBOARD_YARA_MIN_ALERT_SCORE
-                )
-                if risk_result.get("total_score", 0.0) < min_clipboard_score:
-                    risk_result["total_score"] = min_clipboard_score
-                    if "cvss_score" in risk_result:
-                        risk_result["cvss_score"] = round(min_clipboard_score, 2)
-
-                # Alert-only system: ensure alert action for clipboard sensitive leak.
-                risk_result["action"] = "alert"
-                risk_result.setdefault("details", {})
-                risk_result["details"]["clipboard_yara_override"] = {
-                    "applied": True,
-                    "is_clipboard_paste": True,
-                    "yara_matches": len(yara_matches),
-                    "highly_sensitive_yara": has_highly_sensitive_yara,
-                    "min_alert_score": min_clipboard_score,
-                }
-            
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:
                 risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
