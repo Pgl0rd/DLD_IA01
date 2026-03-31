@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hybrid DLP Security Center</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg:       #f4f6fb;
+    --surface:  #ffffff;
+    --border:   #e2e6ef;
+    --text:     #1a202c;
+    --muted:    #64748b;
+    --blue:     #1e40af;
+    --blue-bg:  #eff6ff;
+    --green:    #166534;
+    --green-bg: #f0fdf4;
+    --amber:    #92400e;
+    --amber-bg: #fffbeb;
+    --red:      #991b1b;
+    --red-bg:   #fef2f2;
+    --sidebar:  #1e293b;
+  }
+
+  body { font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); display: flex; min-height: 100vh; }
+
+  /* ── Sidebar ── */
+  #sidebar {
+    width: 240px; flex-shrink: 0;
+    background: var(--sidebar); color: #cbd5e1;
+    padding: 20px 16px; display: flex; flex-direction: column; gap: 20px;
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  }
+  #sidebar h2 { font-size: 13px; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: .06em; margin-bottom: 4px; }
+  .filter-label { font-size: 12px; color: #94a3b8; margin-bottom: 4px; display: block; }
+  .filter-group { display: flex; flex-direction: column; gap: 10px; }
+  #sidebar select, #sidebar input[type=range] { width: 100%; }
+  #sidebar select {
+    background: #334155; border: 1px solid #475569; border-radius: 6px;
+    color: #e2e8f0; padding: 6px 8px; font-size: 13px;
+  }
+  .range-row { display: flex; justify-content: space-between; font-size: 12px; color: #94a3b8; margin-top: 2px; }
+  input[type=range] { accent-color: #3b82f6; }
+  .machine-list { display: flex; flex-direction: column; gap: 4px; }
+  .machine-chip {
+    font-size: 11px; padding: 3px 8px; border-radius: 20px;
+    background: #0f172a; border: 1px solid #334155; color: #94a3b8;
+    cursor: pointer; transition: all .15s; text-align: left;
+  }
+  .machine-chip.active { background: #1d4ed8; border-color: #3b82f6; color: #fff; }
+  .sidebar-stat { font-size: 12px; color: #64748b; line-height: 1.7; }
+  .sidebar-stat span { color: #94a3b8; }
+
+  /* ── Main ── */
+  #main { flex: 1; padding: 24px; overflow-x: hidden; }
+
+  /* Header */
+  .header { text-align: center; margin-bottom: 24px; }
+  .header h1 { font-size: 26px; font-weight: 700; color: var(--blue); }
+  .header p  { font-size: 13px; color: var(--muted); margin-top: 4px; }
+
+  /* KPI row */
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px; }
+  .kpi {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px 16px;
+  }
+  .kpi .label { font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .kpi .value { font-size: 28px; font-weight: 700; }
+  .kpi.blue  { border-left: 4px solid #3b82f6; } .kpi.blue  .value { color: #1d4ed8; }
+  .kpi.green { border-left: 4px solid #22c55e; } .kpi.green .value { color: #166534; }
+  .kpi.red   { border-left: 4px solid #ef4444; } .kpi.red   .value { color: #991b1b; }
+  .kpi.amber { border-left: 4px solid #f59e0b; } .kpi.amber .value { color: #92400e; }
+
+  /* Charts */
+  .charts-row { display: grid; grid-template-columns: 2fr 1fr 1fr; gap: 14px; margin-bottom: 20px; }
+  .chart-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .chart-card h3 { font-size: 13px; font-weight: 600; color: var(--muted); margin-bottom: 12px; }
+  .chart-wrap { position: relative; height: 180px; }
+
+  /* Table */
+  .table-card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px;
+  }
+  .table-card h3 { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+  .table-wrap { overflow-x: auto; max-height: 380px; overflow-y: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  thead th {
+    position: sticky; top: 0; background: #f8fafc;
+    padding: 8px 10px; text-align: left;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px; font-weight: 600; color: var(--muted);
+    text-transform: uppercase; letter-spacing: .04em; white-space: nowrap;
+  }
+  tbody tr:hover { background: #f8fafc; }
+  tbody td { padding: 7px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: middle; }
+  .pill {
+    display: inline-block; font-size: 11px; font-weight: 500;
+    padding: 2px 8px; border-radius: 20px; white-space: nowrap;
+  }
+  .pill-allowed  { background: var(--green-bg); color: var(--green); }
+  .pill-alerted  { background: var(--amber-bg); color: var(--amber); }
+  .pill-blocked  { background: var(--red-bg);   color: var(--red); }
+  .sev-none     { background: #f1f5f9; color: #64748b; }
+  .sev-low      { background: #f0fdf4; color: #166534; }
+  .sev-medium   { background: var(--amber-bg); color: var(--amber); }
+  .sev-high     { background: #fff7ed; color: #9a3412; }
+  .sev-critical { background: var(--red-bg);   color: var(--red); }
+  .kw-tag { font-size: 10px; background: #e0e7ff; color: #3730a3; padding: 1px 5px; border-radius: 3px; margin-right: 2px; }
+
+  /* Pulse dot */
+  .live-dot { display: inline-block; width: 7px; height: 7px; background: #22c55e; border-radius: 50%; margin-right: 6px; animation: pulse 1.5s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.4} }
+
+  /* Responsive */
+  @media (max-width: 900px) {
+    .charts-row { grid-template-columns: 1fr; }
+    .kpi-row    { grid-template-columns: 1fr 1fr; }
+    #sidebar    { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<!-- ════ SIDEBAR ════ -->
+<aside id="sidebar">
+  <div>
+    <h2>🔍 Bộ lọc</h2>
+    <div class="filter-group">
+
+      <div>
+        <label class="filter-label">Action</label>
+        <select id="fAction">
+          <option value="">Tất cả</option>
+          <option value="allowed">Allowed</option>
+          <option value="alerted">Alerted</option>
+          <option value="blocked">Blocked</option>
+        </select>
+      </div>
+
+      <div>
+        <label class="filter-label">Risk Score tối thiểu: <b id="riskVal">0</b></label>
+        <input type="range" id="fRisk" min="0" max="10" step="0.5" value="0"
+          oninput="document.getElementById('riskVal').textContent=this.value; applyFilters()">
+        <div class="range-row"><span>0</span><span>10</span></div>
+      </div>
+
+    </div>
+  </div>
+
+  <div>
+    <h2>🖥 Máy</h2>
+    <div class="machine-list" id="machineList">
+      <button class="machine-chip active" onclick="filterMachine(this,'')">Tất cả</button>
+    </div>
+  </div>
+
+  <div>
+    <h2>📊 Debug</h2>
+    <div class="sidebar-stat" id="sidebarStat">Đang tải...</div>
+  </div>
+</aside>
+
+<!-- ════ MAIN ════ -->
+<main id="main">
+  <div class="header">
+    <h1>🛡️ Hybrid DLP — Security Center</h1>
+    <p><span class="live-dot"></span>Live  &nbsp;|&nbsp; <span id="lastUpdate">—</span></p>
+  </div>
+
+  <!-- KPI -->
+  <div class="kpi-row">
+    <div class="kpi blue">  <div class="label">📊 TỔNG SỰ KIỆN</div> <div class="value" id="kTotal">—</div></div>
+    <div class="kpi green"> <div class="label">✅ LOW</div>           <div class="value" id="kLow">—</div></div>
+    <div class="kpi red">   <div class="label">🔥 HIGH+</div>         <div class="value" id="kHigh">—</div></div>
+    <div class="kpi amber"> <div class="label">🚨 BLOCKED</div>       <div class="value" id="kBlocked">—</div></div>
+  </div>
+
+  <!-- Charts -->
+  <div class="charts-row">
+    <div class="chart-card">
+      <h3>📈 Trend (theo phút)</h3>
+      <div class="chart-wrap"><canvas id="chartTrend"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>🍩 Risk Ratio</h3>
+      <div class="chart-wrap"><canvas id="chartRisk"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <h3>🔑 Top Keywords</h3>
+      <div class="chart-wrap"><canvas id="chartKw"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Table -->
+  <div class="table-card">
+    <h3>🚨 Alerts Log <span id="rowCount" style="font-size:12px;color:var(--muted);font-weight:400"></span></h3>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Máy</th><th>Thời gian</th><th>Severity</th>
+            <th>Action</th><th>Risk</th><th>User</th>
+            <th>File</th><th>Source</th><th>Keywords</th><th>Process</th>
+          </tr>
+        </thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- ════ MODAL CHI TIẾT ════ -->
+<div id="detailModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:999;padding:20px;overflow-y:auto;">
+  <div style="background:white;border-radius:10px;max-width:600px;margin:40px auto;padding:24px;max-height:80vh;overflow-y:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+      <h2 style="font-size:18px;font-weight:700;color:var(--blue);">📋 Chi Tiết Sự Kiện</h2>
+      <button onclick="closeModal()" style="background:none;border:none;font-size:24px;cursor:pointer;color:#94a3b8;">✕</button>
+    </div>
+    
+    <div id="detailContent" style="font-size:13px;line-height:1.8;">
+      <p>Đang tải...</p>
+    </div>
+  </div>
+</div>
+
+<script>
+// ════════════════════════════════════
+// State
+// ════════════════════════════════════
+let allEvents = [];
+let selectedMachine = '';
+let charts = {};
+
+// ════════════════════════════════════
+// Classify severity (giống dashB.py)
+// ════════════════════════════════════
+function severity(score) {
+  const s = parseFloat(score);
+  if (isNaN(s) || s <= 0) return 'None';
+  if (s < 4)  return 'Low';
+  if (s < 7)  return 'Medium';
+  if (s < 9)  return 'High';
+  return 'Critical';
+}
+
+const SEV_COLOR = {
+  None: '#94a3b8', Low: '#22c55e', Medium: '#f59e0b', High: '#f97316', Critical: '#ef4444'
+};
+
+// ════════════════════════════════════
+// Fetch & refresh
+// ════════════════════════════════════
+async function fetchData() {
+  try {
+    const action   = document.getElementById('fAction').value;
+    const minRisk  = document.getElementById('fRisk').value;
+    const machine  = selectedMachine;
+
+    let url = `/api/events?limit=500&min_risk=${minRisk}`;
+    if (action)  url += `&action=${action}`;
+    if (machine) url += `&machine=${encodeURIComponent(machine)}`;
+
+    const [eventsResp, statsResp, machinesResp] = await Promise.all([
+      fetch(url),
+      fetch('/api/stats'),
+      fetch('/api/machines'),
+    ]);
+
+    allEvents = await eventsResp.json();
+    const stats    = await statsResp.json();
+    const machines = await machinesResp.json();
+
+    render(stats, machines);
+  } catch(e) {
+    console.error('Fetch error:', e);
+  }
+}
+
+function applyFilters() { fetchData(); }
+function filterMachine(el, name) {
+  selectedMachine = name;
+  document.querySelectorAll('.machine-chip').forEach(c => c.classList.remove('active'));
+  el.classList.add('active');
+  fetchData();
+}
+
+// ════════════════════════════════════
+// Render all
+// ════════════════════════════════════
+function render(stats, machines) {
+  const events = allEvents;
+
+  // KPI
+  const sevCounts = { None:0, Low:0, Medium:0, High:0, Critical:0 };
+  events.forEach(e => sevCounts[severity(e.risk_score)]++);
+
+  document.getElementById('kTotal').textContent   = events.length;
+  document.getElementById('kLow').textContent     = sevCounts.Low;
+  document.getElementById('kHigh').textContent    = sevCounts.High + sevCounts.Critical;
+  document.getElementById('kBlocked').textContent = events.filter(e => e.action === 'blocked').length;
+  document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString('vi-VN');
+  document.getElementById('rowCount').textContent = `(${events.length} rows)`;
+
+  // Sidebar stats
+  document.getElementById('sidebarStat').innerHTML =
+    `<span>Tổng DB:</span> ${stats.total}<br>` +
+    `<span>Alerted:</span> ${stats.alerted}<br>` +
+    `<span>Blocked:</span> ${stats.blocked}<br>` +
+    `<span>High+:</span> ${stats.high_plus}`;
+
+  // Machine chips
+  const list = document.getElementById('machineList');
+  const existing = [...list.querySelectorAll('.machine-chip')].map(c => c.dataset.m);
+  machines.forEach(m => {
+    if (!existing.includes(m)) {
+      const btn = document.createElement('button');
+      btn.className = 'machine-chip';
+      btn.dataset.m = m;
+      btn.textContent = m;
+      btn.onclick = () => filterMachine(btn, m);
+      list.appendChild(btn);
+    }
+  });
+
+  // Charts
+  renderTrend(events);
+  renderRisk(sevCounts);
+  renderKeywords(stats.top_keywords);
+
+  // Table
+  renderTable(events);
+}
+
+// ════════════════════════════════════
+// Chart: Trend by minute
+// ════════════════════════════════════
+function renderTrend(events) {
+  const buckets = {};
+  events.forEach(e => {
+    const ts = e.timestamp || e.received_at;
+    if (!ts) return;
+    const key = ts.substring(0, 16).replace('T', ' ');
+    buckets[key] = (buckets[key] || 0) + 1;
+  });
+
+  const labels = Object.keys(buckets).sort().slice(-30);
+  const data   = labels.map(k => buckets[k]);
+
+  if (charts.trend) {
+    charts.trend.data.labels = labels;
+    charts.trend.data.datasets[0].data = data;
+    charts.trend.update('none');
+  } else {
+    charts.trend = new Chart(document.getElementById('chartTrend'), {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Events/phút', data,
+          borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,.12)',
+          fill: true, tension: 0.3, pointRadius: 2,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { maxTicksLimit: 6, font: { size: 10 } } },
+          y: { beginAtZero: true, ticks: { font: { size: 10 } } }
+        }
+      }
+    });
+  }
+}
+
+// ════════════════════════════════════
+// Chart: Donut Risk
+// ════════════════════════════════════
+function renderRisk(counts) {
+  const labels = ['None','Low','Medium','High','Critical'].filter(k => counts[k] > 0);
+  const data   = labels.map(k => counts[k]);
+  const colors = labels.map(k => SEV_COLOR[k]);
+
+  if (charts.risk) {
+    charts.risk.data.labels = labels;
+    charts.risk.data.datasets[0].data = data;
+    charts.risk.data.datasets[0].backgroundColor = colors;
+    charts.risk.update('none');
+  } else {
+    charts.risk = new Chart(document.getElementById('chartRisk'), {
+      type: 'doughnut',
+      data: { labels, datasets: [{ data, backgroundColor: colors, borderWidth: 1 }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { position: 'bottom', labels: { font: { size: 11 }, padding: 8 } } }
+      }
+    });
+  }
+}
+
+// ════════════════════════════════════
+// Chart: Top Keywords
+// ════════════════════════════════════
+function renderKeywords(topKw) {
+  if (!topKw || topKw.length === 0) return;
+  const labels = topKw.slice(0, 8).map(k => k.keyword);
+  const data   = topKw.slice(0, 8).map(k => k.count);
+
+  if (charts.kw) {
+    charts.kw.data.labels = labels;
+    charts.kw.data.datasets[0].data = data;
+    charts.kw.update('none');
+  } else {
+    charts.kw = new Chart(document.getElementById('chartKw'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{ data, backgroundColor: '#818cf8', borderRadius: 4 }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { beginAtZero: true, ticks: { font: { size: 10 } } },
+          y: { ticks: { font: { size: 10 } } }
+        }
+      }
+    });
+  }
+}
+
+// ════════════════════════════════════
+// Table
+// ════════════════════════════════════
+function renderTable(events) {
+  const tbody = document.getElementById('tableBody');
+  const sev   = e => severity(e.risk_score);
+  const fmt   = ts => ts ? ts.replace('T',' ').substring(0,19) : '—';
+  const kws   = arr => (arr||[]).map(k => `<span class="kw-tag">${k}</span>`).join('') || '—';
+
+  tbody.innerHTML = events.slice(0, 300).map(e => `
+    <tr onclick="openModal(${e.id})" style="cursor:pointer;">
+      <td>${e.machine_name || '—'}</td>
+      <td style="white-space:nowrap;font-size:11px">${fmt(e.timestamp)}</td>
+      <td><span class="pill sev-${sev(e).toLowerCase()}">${sev(e)}</span></td>
+      <td><span class="pill pill-${e.action}">${e.action}</span></td>
+      <td style="font-weight:600;color:${SEV_COLOR[sev(e)]}">${e.risk_score}</td>
+      <td>${e.user || '—'}</td>
+      <td style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.file_name}">${e.file_name || '—'}</td>
+      <td>${e.source || '—'}</td>
+      <td>${kws(e.keywords)}</td>
+      <td>${e.process_name || '—'}</td>
+    </tr>
+  `).join('');
+}
+
+// ════════════════════════════════════
+// Modal: Xem chi tiết event
+// ════════════════════════════════════
+async function openModal(eventId) {
+  const modal = document.getElementById('detailModal');
+  const content = document.getElementById('detailContent');
+  
+  modal.style.display = 'block';
+  content.innerHTML = '<p style="text-align:center;">⏳ Đang tải...</p>';
+  
+  try {
+    const response = await fetch(`/api/events/${eventId}`);
+    if (!response.ok) throw new Error('Event not found');
+    
+    const event = await response.json();
+    const sev = severity(event.risk_score);
+    const fmt = ts => ts ? ts.replace('T',' ').substring(0,19) : '—';
+    const kws = (arr) => (arr||[]).map(k => `<span class="kw-tag">${k}</span>`).join('') || '—';
+    
+    content.innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px;">🖥 Máy</label>
+          <p style="margin:0;font-weight:600;">${event.machine_name || '—'}</p>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px;">⏰ Thời gian</label>
+          <p style="margin:0;font-weight:600;white-space:nowrap;">${fmt(event.timestamp)}</p>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px;">⚠️ Severity</label>
+          <p style="margin:0;"><span class="pill sev-${sev.toLowerCase()}">${sev}</span></p>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px;">🎯 Risk Score</label>
+          <p style="margin:0;font-weight:600;color:${SEV_COLOR[sev]};font-size:16px;">${event.risk_score}</p>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px;">✋ Action</label>
+          <p style="margin:0;"><span class="pill pill-${event.action}">${event.action}</span></p>
+        </div>
+        <div>
+          <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:4px;">👤 User</label>
+          <p style="margin:0;font-weight:600;">${event.user || '—'}</p>
+        </div>
+      </div>
+      
+      <div style="border-top:1px solid var(--border);padding-top:16px;">
+        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">📁 Đường dẫn file</label>
+        <p style="margin:0 0 16px 0;padding:8px;background:#f8fafc;border-radius:6px;word-break:break-all;font-family:monospace;font-size:12px;">${event.file_path || '—'}</p>
+        
+        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">🗂 Tên file</label>
+        <p style="margin:0 0 16px 0;padding:8px;background:#f8fafc;border-radius:6px;word-break:break-all;font-family:monospace;font-size:12px;">${event.file_name || '—'}</p>
+        
+        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">🔑 Keywords</label>
+        <p style="margin:0 0 16px 0;">${kws(event.keywords)}</p>
+        
+        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">🪟 Window Title</label>
+        <p style="margin:0 0 16px 0;padding:8px;background:#f8fafc;border-radius:6px;word-break:break-all;font-size:12px;">${event.window_title || '—'}</p>
+        
+        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">⚙️ Process</label>
+        <p style="margin:0 0 16px 0;padding:8px;background:#f8fafc;border-radius:6px;word-break:break-all;font-family:monospace;font-size:12px;">${event.process_name || '—'}</p>
+        
+        <label style="display:block;font-size:11px;color:var(--muted);text-transform:uppercase;margin-bottom:8px;">📍 Source</label>
+        <p style="margin:0;padding:8px;background:#f8fafc;border-radius:6px;word-break:break-all;font-size:12px;">${event.source || '—'}</p>
+      </div>
+    `;
+  } catch(e) {
+    content.innerHTML = '<p style="color:var(--red);">❌ Lỗi tải chi tiết: ' + e.message + '</p>';
+  }
+}
+
+function closeModal() {
+  const modal = document.getElementById('detailModal');
+  modal.style.display = 'none';
+}
+
+// Đóng modal khi click ngoài
+document.addEventListener('DOMContentLoaded', function() {
+  const modal = document.getElementById('detailModal');
+  if (modal) {
+    modal.addEventListener('click', function(e) {
+      if (e.target === modal) closeModal();
+    });
+  }
+});
+
+// ════════════════════════════════════
+// Bootstrap
+// ════════════════════════════════════
+fetchData();
+setInterval(fetchData, 1000);   // auto-refresh mỗi 1 giây
+</script>
+</body>
+</html>

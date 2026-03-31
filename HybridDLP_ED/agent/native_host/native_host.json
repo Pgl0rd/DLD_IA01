@@ -1,9 +1,9 @@
 {
   "name": "com.dlp.browser_upload",
   "description": "DLP Browser Upload Native Messaging Host – bridges Chrome Extension to local sensor pipeline.",
-  "path": "C:\\PRJ\\ProjectIA\\Sensor\\native_host\\native_host.bat",
+  "path": "E:\\Capstone\\dlpnew\\31-3\\DLD_IA01-main\\HybridDLP_ED\\agent\\native_host\\native_host.bat",
   "type": "stdio",
   "allowed_origins": [
-    "chrome-extension://pafbpfhlcnllebdecgfbpoofcccfbhdf/"
+    "chrome-extension://mmokjfgcflckfnicdokpaccniiiiammd/"
   ]
 }

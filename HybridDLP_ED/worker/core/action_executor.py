@@ -8,12 +8,17 @@ from loguru import logger
 import sys
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
 from typing import Optional, Dict, Any
 from core.windows_notification import WindowsNotification
+
+# Import sender from agent_sender
+sys.path.insert(0, str(Path(__file__).parent.parent.parent / "agent"))
+from agent_sender import sender
 
 
 class ActionExecutor:
@@ -383,7 +388,11 @@ class ActionExecutor:
             
             # Build alert entry
             alert_entry = {
+                'type': 'alert',
+                'source': 'worker',
+                'severity': 'high' if risk_score >= 7 else 'medium' if risk_score >= 4 else 'low',
                 'timestamp': timestamp,
+                'ts': datetime.fromisoformat(timestamp.replace('Z', '+00:00')).timestamp() if 'T' in timestamp else time.time(),
                 'risk_score': round(float(risk_score), 2),
                 'action': action,
                 'file_path': resolved_file_path if resolved_file_path and not is_clipboard_placeholder else 'Clipboard Content',
@@ -418,6 +427,9 @@ class ActionExecutor:
             # Write back to file
             with open(self.dashboard_log_path, 'w', encoding='utf-8') as f:
                 json.dump(alerts, f, indent=2, ensure_ascii=False)
+            
+            # Send alert to dashboard
+            sender.send(alert_entry)
             
             pid = os.getpid()
             logger.info(
