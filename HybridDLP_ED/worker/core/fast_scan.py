@@ -1,5 +1,5 @@
 """
-Fast Scan Module - YARA Rules và Header Check
+Fast Scan Module - YARA + real content-type detection (magic/container-aware).
 """
 import yara
 from pathlib import Path
@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
+from core.content_pipeline import ContentProcessor
 
 try:
     import magic
@@ -19,11 +20,12 @@ except ImportError:
 
 
 class FastScanEngine:
-    """Fast Scan với YARA và Header Check"""
+    """Fast Scan với YARA và detection theo content thật"""
     
     def __init__(self):
         self.yara_rules = None
         self.mime = None
+        self.content_processor = ContentProcessor(max_text_length=WorkerConfig.ML_MAX_TEXT_LENGTH)
         self._load_yara_rules()
         self._init_file_type_detection()
     
@@ -118,14 +120,11 @@ class FastScanEngine:
             
             # 2. Header Check (File Type Detection) - Skip nếu panic mode
             if not panic_mode:
-                if self.mime:
-                    try:
-                        result['file_type'] = self.mime.from_file(str(file_path))
-                    except Exception as e:
-                        logger.debug(f"File type detection error: {e}")
-                else:
-                    # Fallback: check extension
-                    result['file_type'] = self._get_file_type_from_extension(file_path)
+                detected = self.content_processor.detect_file_type(file_path)
+                result['file_type'] = detected.mime_type
+                result['detected_group'] = detected.group
+                result['detected_by'] = detected.source
+                result['detection_confidence'] = detected.confidence
                 
                 # 3. Encrypted Zip Detection
                 result['is_encrypted_zip'] = self._check_encrypted_zip(file_path)
@@ -140,23 +139,6 @@ class FastScanEngine:
             result['scan_time_ms'] = (time.time() - start_time) * 1000
         
         return result
-    
-    def _get_file_type_from_extension(self, file_path: Path) -> str:
-        """Fallback: lấy file type từ extension"""
-        ext = file_path.suffix.lower()
-        type_map = {
-            '.txt': 'text/plain',
-            '.doc': 'application/msword',
-            '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-            '.pdf': 'application/pdf',
-            '.jpg': 'image/jpeg',
-            '.jpeg': 'image/jpeg',
-            '.png': 'image/png',
-            '.gif': 'image/gif',
-            '.zip': 'application/zip',
-            '.rar': 'application/x-rar-compressed',
-        }
-        return type_map.get(ext, 'application/octet-stream')
     
     def _check_encrypted_zip(self, file_path: Path) -> bool:
         """Kiểm tra file ZIP có mật khẩu không"""

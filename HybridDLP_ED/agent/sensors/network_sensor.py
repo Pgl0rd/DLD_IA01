@@ -516,6 +516,11 @@ class NetworkSensor:
         }
         self._summary_dedup_window_sec = float(kwargs.get("summary_dedup_window_sec", EVENT_DEDUP_WINDOW_SEC))
         self._recent_summary_keys: Dict[str, float] = {}
+        # Debug FLOW noise controls (only affects _dbg prints, not emitted events)
+        self.flow_debug_min_interval_sec = float(kwargs.get("flow_debug_min_interval_sec", 2.0))
+        self.flow_debug_min_bytes_delta = int(kwargs.get("flow_debug_min_bytes_delta", 64 * 1024))
+        self.flow_debug_min_packets_delta = int(kwargs.get("flow_debug_min_packets_delta", 50))
+        self._flow_debug_state: Dict[FlowKey, Dict[str, Any]] = {}
         self._noisy_processes = {
             "svchost.exe",
             "runtimebroker.exe",

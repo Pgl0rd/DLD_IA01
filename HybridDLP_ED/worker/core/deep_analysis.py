@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
+from core.content_pipeline import ContentProcessor
 
 
 class OCRProcessor:
@@ -95,29 +96,21 @@ class OCRProcessor:
         return result
     
     def _is_image_file(self, file_path: Path) -> bool:
-        """Kiểm tra file có phải ảnh không (check header, không chỉ extension)"""
+        """Kiểm tra ảnh/PDF scan bằng signature bytes, không dựa extension."""
         try:
-            # Check extension first (fast)
-            ext = file_path.suffix.lower()
-            if ext in WorkerConfig.OCR_SUPPORTED_FORMATS:
-                # If PDF, need special handling
-                if ext == '.pdf':
-                    return True
-                # For images, check header
-                try:
-                    with open(file_path, 'rb') as f:
-                        header = f.read(8)
-                        # JPEG: FF D8 FF
-                        if header[:3] == b'\xff\xd8\xff':
-                            return True
-                        # PNG: 89 50 4E 47
-                        if header[:4] == b'\x89PNG':
-                            return True
-                        # GIF: GIF87a or GIF89a
-                        if header[:4] in [b'GIF8', b'GIF9']:
-                            return True
-                except:
-                    pass
+            with open(file_path, 'rb') as f:
+                header = f.read(8)
+            if header.startswith(b'%PDF'):
+                return True
+            # JPEG: FF D8 FF
+            if header[:3] == b'\xff\xd8\xff':
+                return True
+            # PNG: 89 50 4E 47
+            if header[:4] == b'\x89PNG':
+                return True
+            # GIF: GIF87a or GIF89a
+            if header[:6] in (b'GIF87a', b'GIF89a'):
+                return True
             return False
         except Exception as e:
             logger.debug(f"Error checking file type: {e}")
@@ -134,8 +127,10 @@ class OCRProcessor:
             return None
         
         try:
-            # Handle PDF (cần pdf2image, tạm thời skip)
-            if file_path.suffix.lower() == '.pdf':
+            # Handle PDF by header detection (still skipped without pdf2image).
+            with open(file_path, "rb") as f:
+                header = f.read(4)
+            if header.startswith(b"%PDF"):
                 logger.warning("PDF OCR not implemented yet (requires pdf2image)")
                 return None
             
@@ -165,6 +160,7 @@ class DeepAnalysisEngine:
     
     def __init__(self):
         self.ocr_processor = OCRProcessor()
+        self.content_processor = ContentProcessor(max_text_length=WorkerConfig.ML_MAX_TEXT_LENGTH)
         # ML Classifier sẽ được import lazy
         self.ml_classifier = None
     
@@ -202,7 +198,11 @@ class DeepAnalysisEngine:
         result = {
             'ocr_text': None,
             'ml_result': None,
-            'is_sensitive': False
+            'is_sensitive': False,
+            'detected_type': None,
+            'detected_group': None,
+            'detected_by': None,
+            'extraction': None,
         }
         
         # Skip deep analysis nếu panic mode
@@ -211,31 +211,32 @@ class DeepAnalysisEngine:
             return result
         
         try:
-            # 1. OCR (nếu là ảnh)
-            if file_type and ('image' in file_type or file_type == 'application/pdf'):
+            detected = self.content_processor.detect_file_type(file_path)
+            # If fast-scan provided file_type, keep it as a hint but prioritize real detector.
+            if file_type and not detected.mime_type:
+                detected.mime_type = file_type
+
+            result['detected_type'] = detected.mime_type
+            result['detected_group'] = detected.group
+            result['detected_by'] = detected.source
+
+            extraction = self.content_processor.extract_content(file_path, detected)
+            result['extraction'] = {
+                'parser': extraction.parser,
+                'confidence': extraction.confidence,
+                'needs_ocr': extraction.needs_ocr,
+                'encrypted': extraction.encrypted,
+                'truncated': extraction.truncated,
+                'error': extraction.error,
+                'metadata': extraction.metadata,
+            }
+
+            # OCR only when extraction says it is needed (image/pdf scan, etc.)
+            if extraction.needs_ocr:
                 result['ocr_text'] = self.ocr_processor.extract_text(file_path)
-            
-            # 2. ML Classification (nếu có text)
-            text_to_classify = None
-            
-            # Lấy text từ OCR hoặc đọc file text
-            if result['ocr_text']:
-                text_to_classify = result['ocr_text']
-            elif file_type and 'text' in file_type:
-                # Đọc file text
-                try:
-                    with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                        text_to_classify = f.read(WorkerConfig.ML_MAX_TEXT_LENGTH)
-                except UnicodeDecodeError:
-                    # Try other encodings
-                    try:
-                        with open(file_path, 'r', encoding='latin-1', errors='ignore') as f:
-                            text_to_classify = f.read(WorkerConfig.ML_MAX_TEXT_LENGTH)
-                    except Exception as e:
-                        logger.debug(f"Error reading text file: {e}")
-                except Exception as e:
-                    logger.debug(f"Error reading text file: {e}")
-            
+
+            # 2. ML Classification from extracted content (or OCR fallback)
+            text_to_classify = result['ocr_text'] or extraction.text
             if text_to_classify and self._lazy_load_ml():
                 result['ml_result'] = self.ml_classifier.classify(text_to_classify)
                 if result['ml_result']:

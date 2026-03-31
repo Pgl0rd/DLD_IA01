@@ -5,6 +5,7 @@ import os
 from datetime import datetime
 import altair as alt
 from streamlit_autorefresh import st_autorefresh
+import streamlit.components.v1 as components
 
 # ================= CONFIG =================
 st.set_page_config(
@@ -36,6 +37,7 @@ div[data-testid="metric-container"] {
 
 # ================= PATH =================
 LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "alerts.json")
+ALERT_WINDOW_MIN_SCORE = float(os.getenv("DASHBOARD_ALERT_WINDOW_MIN_SCORE", "7.0"))
 
 # ================= LOAD DATA =================
 def load_data():
@@ -115,6 +117,73 @@ st.markdown('<div class="main-title">🛡️ HYBRID DLP - SECURITY CENTER</div>'
 st.divider()
 
 df = load_data()
+
+
+def notify_browser(title: str, message: str):
+    """Browser popup notification (works in Docker via dashboard tab)."""
+    safe_title = json.dumps(title)
+    safe_message = json.dumps(message)
+    components.html(
+        f"""
+        <script>
+        (function() {{
+          const title = {safe_title};
+          const message = {safe_message};
+          if (!("Notification" in window)) return;
+          const show = () => {{
+            try {{ new Notification(title, {{ body: message }}); }} catch (e) {{}}
+          }};
+          if (Notification.permission === "granted") {{
+            show();
+          }} else if (Notification.permission !== "denied") {{
+            Notification.requestPermission().then((p) => {{
+              if (p === "granted") show();
+            }});
+          }}
+        }})();
+        </script>
+        """,
+        height=0,
+    )
+
+
+# Popup/toast high-risk alerts in dashboard tab (Docker-friendly alternative to native Windows popup).
+if "last_seen_alert_ts" not in st.session_state:
+    st.session_state["last_seen_alert_ts"] = None
+if "last_notified_alert_key" not in st.session_state:
+    st.session_state["last_notified_alert_key"] = None
+
+if not df.empty and {"timestamp", "risk_score", "file_name", "action"}.issubset(df.columns):
+    high_df = df[df["risk_score"] >= ALERT_WINDOW_MIN_SCORE].sort_values("timestamp")
+    if not high_df.empty:
+        latest = high_df.iloc[-1]
+        latest_key = f"{latest['timestamp']}|{latest.get('file_name','')}|{latest.get('risk_score', 0)}|{latest.get('action','')}"
+
+        # First load: still notify latest high-risk once (so user sees alert immediately).
+        if st.session_state["last_seen_alert_ts"] is None:
+            score = float(latest.get("risk_score", 0.0))
+            name = str(latest.get("file_name", "Unknown"))
+            action = str(latest.get("action", "alerted")).upper()
+            msg = f"{action} | {name} | Score {score:.1f}/10"
+            st.toast(f"🚨 {msg}", icon="🚨")
+            notify_browser("HybridDLP Alert", msg)
+            st.session_state["last_notified_alert_key"] = latest_key
+            st.session_state["last_seen_alert_ts"] = latest["timestamp"]
+        else:
+            new_alerts = high_df[high_df["timestamp"] > st.session_state["last_seen_alert_ts"]]
+            if not new_alerts.empty:
+                for _, row in new_alerts.tail(3).iterrows():
+                    row_key = f"{row['timestamp']}|{row.get('file_name','')}|{row.get('risk_score', 0)}|{row.get('action','')}"
+                    if row_key == st.session_state["last_notified_alert_key"]:
+                        continue
+                    score = float(row.get("risk_score", 0.0))
+                    name = str(row.get("file_name", "Unknown"))
+                    action = str(row.get("action", "alerted")).upper()
+                    msg = f"{action} | {name} | Score {score:.1f}/10"
+                    st.toast(f"🚨 {msg}", icon="🚨")
+                    notify_browser("HybridDLP Alert", msg)
+                    st.session_state["last_notified_alert_key"] = row_key
+                st.session_state["last_seen_alert_ts"] = new_alerts["timestamp"].max()
 
 # ================= SIDEBAR =================
 st.sidebar.header("🔍 Bộ lọc")
