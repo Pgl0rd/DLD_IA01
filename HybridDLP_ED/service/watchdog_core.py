@@ -6,12 +6,13 @@ import logging
 import subprocess
 import threading
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 
 # ===== Paths =====
-BASE_DIR = Path(__file__).resolve().parent               # ...\agent
-PROJECT_ROOT = BASE_DIR.parent                          # ...\HybridDLP_ED
-RUNTIME_DIR = PROJECT_ROOT / "runtime"
+SERVICE_DIR = Path(__file__).resolve().parent            # ...\service
+PROJECT_ROOT = SERVICE_DIR.parent                        # ...\HybridDLP_ED
+AGENT_DIR = PROJECT_ROOT / "agent"
+RUNTIME_DIR = AGENT_DIR / "runtime"
 LOG_DIR = RUNTIME_DIR / "logs"
 STATE_DIR = RUNTIME_DIR / "state"
 
@@ -144,13 +145,19 @@ class Supervisor:
 
     def __init__(self):
         self._stop_evt = threading.Event()
-        self.worker: Optional[subprocess.Popen] = None
-
-        self._backoff_i = 0
+        self.processes: Dict[str, Optional[subprocess.Popen]] = {
+            "sensor": None,
+            "worker": None,
+            "dashboard": None,
+        }
+        self._backoff_i: Dict[str, int] = {k: 0 for k in self.processes}
         self._stale_strikes = 0
-
-        self._sensor_out = None
-        self._sensor_err = None
+        self._logs: Dict[str, Tuple[Optional[object], Optional[object]]] = {
+            k: (None, None) for k in self.processes
+        }
+        self.enable_sensor = os.getenv("HYBRIDDLP_ENABLE_SENSOR", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self.enable_worker = os.getenv("HYBRIDDLP_ENABLE_WORKER", "1").strip().lower() in {"1", "true", "yes", "on"}
+        self.enable_dashboard = os.getenv("HYBRIDDLP_ENABLE_DASHBOARD", "1").strip().lower() in {"1", "true", "yes", "on"}
 
     def request_stop(self):
         self._stop_evt.set()
@@ -167,58 +174,69 @@ class Supervisor:
             "ts": int(time.time()),
             "role": "watchdog",
             "status": status,
-            "worker_pid": self.worker.pid if self.worker else None,
+            "pids": {
+                name: (proc.pid if proc else None)
+                for name, proc in self.processes.items()
+            },
         }
         atomic_write_json(WD_HEARTBEAT_FILE, payload)
 
-    def _open_sensor_logs(self) -> Tuple[object, object]:
-        # append binary để giữ history + tránh vấn đề encoding
-        out_f = open(LOG_DIR / "sensor.stdout.log", "ab", buffering=0)
-        err_f = open(LOG_DIR / "sensor.stderr.log", "ab", buffering=0)
+    def _open_logs(self, name: str) -> Tuple[object, object]:
+        out_f = open(LOG_DIR / f"{name}.stdout.log", "ab", buffering=0)
+        err_f = open(LOG_DIR / f"{name}.stderr.log", "ab", buffering=0)
         return out_f, err_f
 
-    def _close_sensor_logs(self):
-        for f in (self._sensor_out, self._sensor_err):
+    def _close_logs(self, name: str):
+        out_f, err_f = self._logs.get(name, (None, None))
+        for f in (out_f, err_f):
             try:
                 if f:
                     f.close()
             except Exception:
                 pass
-        self._sensor_out = None
-        self._sensor_err = None
+        self._logs[name] = (None, None)
 
-    def spawn_worker(self) -> subprocess.Popen:
+    def spawn_process(self, name: str) -> subprocess.Popen:
         python_exe = get_python_exe()
-        sensor_path = str(BASE_DIR / "sensor.py")
-
-        cmd = [python_exe, sensor_path]
-        logger.info(f"Spawning sensor: {cmd}")
+        if name == "sensor":
+            cmd = [python_exe, "-m", "agent.sensor"]
+            cwd = str(PROJECT_ROOT)
+        elif name == "worker":
+            cmd = [python_exe, "worker.py"]
+            cwd = str(PROJECT_ROOT / "worker")
+        elif name == "dashboard":
+            cmd = [python_exe, "-m", "streamlit", "run", "dashB.py"]
+            cwd = str(PROJECT_ROOT / "dashboard")
+        else:
+            raise ValueError(f"Unknown process: {name}")
+        logger.info(f"Spawning {name}: {cmd}")
 
         creationflags = 0
         if os.name == "nt":
             creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
 
-        self._close_sensor_logs()
-        self._sensor_out, self._sensor_err = self._open_sensor_logs()
+        self._close_logs(name)
+        out_f, err_f = self._open_logs(name)
+        self._logs[name] = (out_f, err_f)
 
         p = subprocess.Popen(
             cmd,
-            cwd=str(BASE_DIR),  # service thường chạy từ System32 -> ép cwd
-            stdout=self._sensor_out,
-            stderr=self._sensor_err,
+            cwd=cwd,
+            stdout=out_f,
+            stderr=err_f,
             creationflags=creationflags,
         )
         return p
 
-    def stop_worker(self):
-        if self.worker and self.worker.poll() is None:
-            pid = self.worker.pid
-            logger.info(f"Stopping sensor pid={pid}")
+    def stop_process(self, name: str):
+        proc = self.processes.get(name)
+        if proc and proc.poll() is None:
+            pid = proc.pid
+            logger.info(f"Stopping {name} pid={pid}")
             kill_process_tree_windows(pid)
-
-        self.worker = None
-        self._stale_strikes = 0
-        self._close_sensor_logs()
+        self.processes[name] = None
+        self._backoff_i[name] = 0
+        self._close_logs(name)
 
     def _sleep_interruptible(self, seconds: int):
         for _ in range(seconds):
@@ -228,16 +246,21 @@ class Supervisor:
 
     def monitor_loop(self):
         # ép cwd
-        os.chdir(str(BASE_DIR))
+        os.chdir(str(PROJECT_ROOT))
 
         logger.info("Supervisor started.")
-        logger.info(f"BASE_DIR={BASE_DIR}")
+        logger.info(f"SERVICE_DIR={SERVICE_DIR}")
         logger.info(f"PROJECT_ROOT={PROJECT_ROOT}")
+        logger.info(f"AGENT_DIR={AGENT_DIR}")
         logger.info(f"LOG_DIR={LOG_DIR}")
         logger.info(f"STATE_DIR={STATE_DIR}")
         logger.info(f"Chosen python_exe={get_python_exe()}")
         logger.info(f"sys.executable={sys.executable}")
         logger.info(f"HYBRIDDLP_PYTHON={os.environ.get('HYBRIDDLP_PYTHON')}")
+        logger.info(
+            f"Enabled stack: sensor={self.enable_sensor}, "
+            f"worker={self.enable_worker}, dashboard={self.enable_dashboard}"
+        )
 
         # dọn stop.flag cũ
         if STOP_FILE.exists():
@@ -250,41 +273,41 @@ class Supervisor:
 
         while not self.stopped():
             try:
-                # (1) worker chưa có hoặc đã chết
-                if self.worker is None or self.worker.poll() is not None:
-                    if self.worker is not None:
-                        rc = self.worker.returncode
-                        logger.warning(f"Sensor exited. returncode={rc}")
+                desired = {
+                    "sensor": self.enable_sensor,
+                    "worker": self.enable_worker,
+                    "dashboard": self.enable_dashboard,
+                }
+                for name, enabled in desired.items():
+                    if not enabled:
+                        continue
+                    proc = self.processes.get(name)
+                    if proc is None or proc.poll() is not None:
+                        if proc is not None:
+                            logger.warning(f"{name} exited. returncode={proc.returncode}")
+                        wait_s = BACKOFF_SECONDS[min(self._backoff_i[name], len(BACKOFF_SECONDS) - 1)]
+                        if wait_s > 0:
+                            logger.info(f"Backoff {wait_s}s before restarting {name}...")
+                            self._sleep_interruptible(wait_s)
+                        if self.stopped():
+                            break
+                        self.processes[name] = self.spawn_process(name)
+                        logger.info(f"{name} started pid={self.processes[name].pid}")
+                        self._backoff_i[name] = min(self._backoff_i[name] + 1, len(BACKOFF_SECONDS) - 1)
 
-                    wait_s = BACKOFF_SECONDS[min(self._backoff_i, len(BACKOFF_SECONDS) - 1)]
-                    if wait_s > 0:
-                        logger.info(f"Backoff {wait_s}s before restart...")
-                        self._sleep_interruptible(wait_s)
-
-                    if self.stopped():
-                        break
-
-                    self.worker = self.spawn_worker()
-                    logger.info(f"Sensor started pid={self.worker.pid}")
-
-                    # tăng backoff vì vừa phải restart (crash loop)
-                    self._backoff_i = min(self._backoff_i + 1, len(BACKOFF_SECONDS) - 1)
-                    self._stale_strikes = 0
-
-                # (2) worker đang sống nhưng heartbeat stale
-                if self.worker and self.worker.poll() is None:
+                # Sensor heartbeat health check
+                sensor_proc = self.processes.get("sensor")
+                if self.enable_sensor and sensor_proc and sensor_proc.poll() is None:
                     if is_heartbeat_stale_by_ts(SENSOR_HEARTBEAT_FILE, HB_TIMEOUT):
                         self._stale_strikes += 1
                         logger.warning(f"Sensor heartbeat stale strike={self._stale_strikes}")
-
                         if self._stale_strikes >= STALE_STRIKES_TO_RESTART:
                             logger.warning("Sensor stale threshold reached -> restarting sensor")
-                            self.stop_worker()
+                            self.stop_process("sensor")
                             continue
                     else:
-                        # heartbeat OK -> reset strikes + reset backoff
                         self._stale_strikes = 0
-                        self._backoff_i = 0
+                        self._backoff_i["sensor"] = 0
 
                 self.write_watchdog_heartbeat("running")
                 time.sleep(2)
@@ -295,7 +318,9 @@ class Supervisor:
 
         logger.info("Supervisor stopping...")
         self.write_watchdog_heartbeat("stopping")
-        self.stop_worker()
+        self.stop_process("dashboard")
+        self.stop_process("worker")
+        self.stop_process("sensor")
         self.write_watchdog_heartbeat("stopped")
         logger.info("Supervisor stopped cleanly.")
 
