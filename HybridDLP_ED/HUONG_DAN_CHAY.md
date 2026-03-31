@@ -1,3 +1,189 @@
+# HUONG DAN CHAY HE THONG (KHONG DOCKER)
+
+Tai lieu nay huong dan chay HybridDLP theo kieu native tren Windows.
+Muc tieu: chay duoc Agent + Worker + Dashboard va hien popup canh bao Windows native.
+
+## 1) Yeu cau moi truong
+
+- Windows 10/11
+- Python 3.10+ (khuyen nghi 3.11/3.12)
+- Quyen Administrator de bat packet capture/sensor
+- Co internet de cai package
+
+## 2) Cau truc thanh phan
+
+- `agent/`: thu thap event tu endpoint (process, clipboard, network, browser upload)
+- `worker/`: fast scan + deep analysis + risk scoring + action
+- `dashboard/`: giao dien Streamlit de theo doi log canh bao
+
+## 3) Cai dependencies
+
+Mo 3 terminal PowerShell, tat ca deu o root:
+`C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED`
+
+### 3.1 Agent
+
+```powershell
+cd agent
+pip install -r requirements.txt
+```
+
+### 3.2 Worker
+
+```powershell
+cd ..\worker
+pip install -r requirements.txt
+```
+
+Neu can popup Windows native, cai them:
+
+```powershell
+pip install win10toast plyer pywin32
+```
+
+### 3.3 Dashboard
+
+```powershell
+cd ..\dashboard
+pip install -r requirements.txt
+```
+
+## 4) Cau hinh nhanh quan trong
+
+File: `worker/config.py`
+
+- `RISK_ALERT_THRESHOLD = 4.0` (thang 0-10)
+- `WINDOWS_ALERT_MIN_SCORE = 7.0` (chi popup native khi diem cao)
+
+Neu muon popup nhieu hon khi test, ha tam:
+- `WINDOWS_ALERT_MIN_SCORE = 4.0`
+
+## 5) Thu tu chay dung
+
+## B1. Chay Worker (Terminal 1)
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\worker
+python worker.py
+```
+
+Ky vong:
+- Log co dong khoi tao Detection Engine
+- Khong bao loi import/module
+
+## B2. Chay Dashboard (Terminal 2)
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\dashboard
+streamlit run dashB.py
+```
+
+Mo browser:
+- http://localhost:8501
+
+Cho phep Notification cho tab dashboard (neu ban muon browser notification).
+
+## B3. Chay Agent (Terminal 3 - Administrator)
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\agent
+python -m agent.sensor
+```
+
+Hoac neu du an dang dung watchdog:
+
+```powershell
+python watchdog_core.py
+```
+
+## 6) Kiem tra he thong dang hoat dong
+
+### 6.1 Kiem tra event queue
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\agent\runtime
+dir
+```
+
+Kiem tra co:
+- `events.db`
+- `events_*.jsonl` (neu co backend jsonl)
+
+### 6.2 Kiem tra Worker da xu ly
+
+Xem log:
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\worker
+Get-Content .\logs\detection_engine.log -Tail 50
+```
+
+### 6.3 Kiem tra Dashboard log
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\dashboard\logs
+dir
+```
+
+Can co `alerts.json`.
+
+## 7) Test popup Windows native dung cach
+
+Popup native Windows chi co khi Worker chay tren host Windows (khong Docker Linux).
+
+Chay test truc tiep:
+
+```powershell
+cd C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\worker
+python -c "from core.windows_notification import WindowsNotification as W; W().show_violation_alert('TEST POPUP', {'risk_score': 9.2, 'window_title': 'Manual Test', 'yara_matches': [{'rule':'demo_rule'}]})"
+```
+
+Neu popup khong hien:
+- Cai them: `pip install win10toast plyer pywin32`
+- Chay lai terminal bang quyen user desktop (khong phai session service khong co UI)
+
+## 8) Khac phuc loi thuong gap
+
+### A. Co event nhung khong co popup native
+
+- Worker dang chay trong Docker Linux -> khong the toast native
+- `WINDOWS_ALERT_MIN_SCORE` qua cao
+- Thieu package notification (`win10toast/plyer/pywin32`)
+
+### B. Dashboard co log nhung khong thay dong moi
+
+- Kiem tra file `dashboard/logs/alerts.json` co duoc cap nhat khong
+- Kiem tra `action_executor.py` co log "Saved alert to dashboard"
+
+### C. Network sensor spam log
+
+Da co co che throttle flow debug trong `agent/sensors/network_sensor.py`.
+Neu van nhieu, tang nguong:
+- `flow_debug_min_interval_sec`
+- `flow_debug_min_bytes_delta`
+- `flow_debug_min_packets_delta`
+
+## 9) Lenh tat nhanh
+
+Dung `Ctrl + C` o tung terminal:
+1. Agent
+2. Worker
+3. Dashboard
+
+## 10) Checklist run thanh cong
+
+- [ ] Agent chay khong crash
+- [ ] Worker chay va consume event
+- [ ] Dashboard mo duoc localhost:8501
+- [ ] Co ban ghi moi trong `dashboard/logs/alerts.json`
+- [ ] Popup Windows native hien khi event risk cao
+
+---
+
+Neu ban muon, buoc tiep theo minh co the tach tai lieu rieng:
+- `HUONG_DAN_CHAY_NATIVE.md` (khong docker)
+- `HUONG_DAN_CHAY_DOCKER.md` (docker)
+de khong bi lon thong tin.
 # 📖 HƯỚNG DẪN CHẠY TOÀN BỘ HỆ THỐNG HybridDLP
 
 ## 📋 Mục lục

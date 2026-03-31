@@ -36,13 +36,27 @@ div[data-testid="metric-container"] {
 """, unsafe_allow_html=True)
 
 # ================= PATH =================
-LOG_FILE = os.path.join(os.path.dirname(__file__), "logs", "alerts.json")
+LOG_DIR = os.path.join(os.path.dirname(__file__), "logs")
+LOG_FILE = os.path.join(LOG_DIR, "alerts.json")
 ALERT_WINDOW_MIN_SCORE = float(os.getenv("DASHBOARD_ALERT_WINDOW_MIN_SCORE", "7.0"))
 
 # ================= LOAD DATA =================
 def load_data():
+    # Ensure dashboard log path always exists in local runs.
+    os.makedirs(LOG_DIR, exist_ok=True)
+
     if not os.path.exists(LOG_FILE):
-        st.warning(f"⚠ Log file not found: {LOG_FILE}")
+        try:
+            with open(LOG_FILE, "w", encoding="utf-8") as f:
+                json.dump([], f, ensure_ascii=False)
+        except Exception as e:
+            st.error(f"❌ Không thể khởi tạo log file: {e}")
+            return pd.DataFrame()
+
+        st.info(
+            "ℹ Chưa có dữ liệu cảnh báo. "
+            "Hãy chạy Worker + Agent và tạo 1 sự kiện để dashboard cập nhật."
+        )
         return pd.DataFrame()
 
     try:
@@ -207,7 +221,10 @@ if not df.empty:
 
 # ================= NO DATA =================
 if df.empty:
-    st.warning("⚠ Không có dữ liệu sau khi filter")
+    st.info(
+        "ℹ Chưa có dữ liệu hiển thị. "
+        "Nếu vừa khởi động hệ thống, hãy tạo event thử rồi chờ dashboard tự refresh."
+    )
     st.stop()
 
 # ================= KPI =================

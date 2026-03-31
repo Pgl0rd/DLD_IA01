@@ -6,10 +6,15 @@ from pathlib import Path
 from typing import Dict, Any
 
 # Base directory
-# Fix: Use absolute path to avoid resolution issues in Docker
-# In Docker, worker runs from /app, so BASE_DIR should be /app
+# - Docker Linux: /app
+# - Native Windows/Linux: project root (parent of worker/)
 _config_file = Path(__file__).resolve()
-BASE_DIR = Path("/app") if Path("/app").exists() else _config_file.parent.parent.resolve()
+_docker_app = Path("/app")
+_running_in_docker = (
+    os.name != "nt"
+    and (_docker_app.exists() or Path("/.dockerenv").exists())
+)
+BASE_DIR = _docker_app if _running_in_docker else _config_file.parent.parent.resolve()
 AGENT_DIR = BASE_DIR / "agent"
 WORKER_DIR = BASE_DIR / "worker"
 
