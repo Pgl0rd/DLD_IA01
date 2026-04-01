@@ -540,9 +540,10 @@ class DetectionEngine:
                 last_alert = self._alert_dedup.get(file_hash)
                 if last_alert is not None and (now_ts - last_alert) < dedup_sec:
                     suppress_alert = True
-                    logger.info(
-                        f"Alert dedup: same SHA-256 within {dedup_sec}s — downgrade to log "
-                        f"(hash {file_hash[:16]}…)"
+                    logger.warning(
+                        f"Alert dedup: same SHA-256 within {dedup_sec}s — executed LOG instead of ALERT "
+                        f"(no Windows toast; dashboard action=allowed). hash={file_hash[:16]}… "
+                        f"Disable dedup: ALERT_DEDUP_SEC=0"
                     )
             exec_action = "log" if suppress_alert else action
             if action == "alert" and not suppress_alert:
@@ -587,8 +588,9 @@ class DetectionEngine:
             logger.info(
                 f"Processed: {file_path.name} | "
                 f"Score: {risk_result['total_score']:.1f} | "
-                f"Action: {action.upper()} | "
-                f"Sensitivity: {report.get('File_Sensitivity', 'Unknown')}"
+                f"Executed: {exec_action.upper()}"
+                + (f" (policy={action.upper()}, dedup)" if suppress_alert else "")
+                + f" | Sensitivity: {report.get('File_Sensitivity', 'Unknown')}"
             )
             
             return True
