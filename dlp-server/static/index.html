@@ -163,15 +163,18 @@
   </div>
 
   <div>
-    <h2>📊 Debug</h2>
+
+    <h2>📊 Thống Kê</h2>
     <div class="sidebar-stat" id="sidebarStat">Đang tải...</div>
-  </div>
-</aside>
+  </div></aside>
 
 <!-- ════ MAIN ════ -->
 <main id="main">
   <div class="header">
-    <h1>🛡️ Hybrid DLP — Security Center</h1>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;">
+      <h1>🛡️ Hybrid DLP — Security Center</h1>
+      <button onclick="openEndpointManagement()" style="padding:8px 16px;background:#1e40af;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;">🔌 Quản Lý Endpoints</button>
+    </div>
     <p><span class="live-dot"></span>Live  &nbsp;|&nbsp; <span id="lastUpdate">—</span></p>
   </div>
 
@@ -231,6 +234,75 @@
   </div>
 </div>
 
+<!-- ════ MODAL THÊM AGENT ════ -->
+<div id="addAgentModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:999;padding:20px;overflow-y:auto;">
+  <div style="background:white;border-radius:10px;max-width:500px;margin:40px auto;padding:24px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+      <h2 style="font-size:18px;font-weight:700;color:var(--blue);">➕ Thêm Agent Mới</h2>
+      <button onclick="closeAddAgentModal()" style="background:none;border:none;font-size:24px;cursor:pointer;color:#94a3b8;">✕</button>
+    </div>
+    
+    <div style="display:flex;flex-direction:column;gap:12px;">
+      <div>
+        <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;font-weight:600;">API Key</label>
+        <input type="text" id="newAgentKey" placeholder="Ví dụ: dlp-key-my-new-agent" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;font-family:monospace;">
+        <button onclick="generateApiKey()" style="margin-top:4px;padding:4px 8px;background:#e2e6ef;border:none;border-radius:4px;cursor:pointer;font-size:11px;color:var(--text);">🔀 Tạo ngẫu nhiên</button>
+      </div>
+      
+      <div>
+        <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;font-weight:600;">Tên Máy (Machine Name)</label>
+        <input type="text" id="newMachineName" placeholder="Ví dụ: PC-Accounting-01" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+      </div>
+      
+      <div>
+        <label style="display:block;font-size:12px;color:var(--muted);margin-bottom:6px;font-weight:600;">Tên Hiển Thị (Display Name)</label>
+        <input type="text" id="newDisplayName" placeholder="Ví dụ: PC-KeToan-01 (tùy chọn)" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;font-size:13px;">
+      </div>
+      
+      <div id="agentMessage" style="display:none;padding:10px;border-radius:6px;font-size:12px;"></div>
+      
+      <div style="display:flex;gap:8px;margin-top:8px;">
+        <button onclick="saveNewAgent()" style="flex:1;padding:10px;background:#3b82f6;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;">➕ Thêm Agent</button>
+        <button onclick="closeAddAgentModal()" style="flex:1;padding:10px;background:#e2e6ef;color:var(--text);border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;">Hủy</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════ MODAL QUẢN LÝ ENDPOINTS ════ -->
+<div id="endpointManagementModal" style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.5);z-index:998;padding:20px;overflow-y:auto;">
+  <div style="background:white;border-radius:10px;max-width:1000px;margin:20px auto;padding:24px;max-height:90vh;overflow-y:auto;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+      <h2 style="font-size:20px;font-weight:700;color:var(--blue);">🔌 Quản Lý Endpoints (Agents)</h2>
+      <button onclick="closeEndpointManagement()" style="background:none;border:none;font-size:24px;cursor:pointer;color:#94a3b8;">✕</button>
+    </div>
+    
+    <div style="margin-bottom:16px;display:flex;gap:8px;">
+      <button onclick="openAddAgentModal()" style="padding:8px 16px;background:#3b82f6;color:white;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;">➕ Thêm Endpoint Mới</button>
+      <button onclick="refreshEndpointList()" style="padding:8px 16px;background:#e2e6ef;border:none;border-radius:6px;cursor:pointer;font-weight:600;font-size:13px;">🔄 Làm mới</button>
+    </div>
+    
+    <div style="overflow-x:auto;border:1px solid var(--border);border-radius:6px;">
+      <table style="width:100%;border-collapse:collapse;font-size:12px;">
+        <thead>
+          <tr style="background:#f8fafc;border-bottom:1px solid var(--border);">
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">Trạng Thái</th>
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">Tên Hiển Thị</th>
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">Tên Máy</th>
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">API Key</th>
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">Lần Kết Nối Cuối</th>
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">Ngày Tạo</th>
+            <th style="padding:12px;text-align:left;font-weight:600;color:var(--muted);text-transform:uppercase;font-size:10px;">Hành Động</th>
+          </tr>
+        </thead>
+        <tbody id="endpointTableBody">
+          <tr><td colspan="7" style="padding:20px;text-align:center;color:#94a3b8;">Đang tải...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
 <script>
 // ════════════════════════════════════
 // State
@@ -238,6 +310,8 @@
 let allEvents = [];
 let selectedMachine = '';
 let charts = {};
+let allAgents = [];
+let adminKey = sessionStorage.getItem('adminKey') || '';  // Lưu admin key trong session
 
 // ════════════════════════════════════
 // Classify severity (giống dashB.py)
@@ -268,15 +342,17 @@ async function fetchData() {
     if (action)  url += `&action=${action}`;
     if (machine) url += `&machine=${encodeURIComponent(machine)}`;
 
-    const [eventsResp, statsResp, machinesResp] = await Promise.all([
+    const [eventsResp, statsResp, machinesResp, agentsResp] = await Promise.all([
       fetch(url),
       fetch('/api/stats'),
       fetch('/api/machines'),
+      fetch('/api/agents'),
     ]);
 
     allEvents = await eventsResp.json();
     const stats    = await statsResp.json();
     const machines = await machinesResp.json();
+    allAgents = await agentsResp.json();
 
     render(stats, machines);
   } catch(e) {
@@ -549,6 +625,228 @@ document.addEventListener('DOMContentLoaded', function() {
     });
   }
 });
+
+// ════════════════════════════════════
+// Agent Management
+// ════════════════════════════════════
+function openAddAgentModal() {
+  document.getElementById('addAgentModal').style.display = 'block';
+  document.getElementById('agentMessage').style.display = 'none';
+}
+
+function closeAddAgentModal() {
+  document.getElementById('addAgentModal').style.display = 'none';
+  document.getElementById('newAgentKey').value = '';
+  document.getElementById('newMachineName').value = '';
+  document.getElementById('newDisplayName').value = '';
+  document.getElementById('agentMessage').style.display = 'none';
+}
+
+function generateApiKey() {
+  // Tạo key ngẫu nhiên giống format dlp-key-xxxxx
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789-';
+  let key = 'dlp-key-';
+  for (let i = 0; i < 12; i++) {
+    key += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  document.getElementById('newAgentKey').value = key;
+}
+
+async function saveNewAgent() {
+  const apiKey = document.getElementById('newAgentKey').value.trim();
+  const machineName = document.getElementById('newMachineName').value.trim();
+  const displayName = document.getElementById('newDisplayName').value.trim() || machineName;
+  
+  const msgDiv = document.getElementById('agentMessage');
+  
+  if (!apiKey || !machineName) {
+    msgDiv.style.display = 'block';
+    msgDiv.style.background = '#fef2f2';
+    msgDiv.style.color = '#991b1b';
+    msgDiv.textContent = '❌ Vui lòng nhập API Key và Machine Name';
+    return;
+  }
+  
+  // Nếu chưa nhập admin key, hỏi
+  if (!adminKey) {
+    adminKey = prompt('Nhập Admin Key (Dashboard Secret Key):');
+    if (!adminKey) return;
+    sessionStorage.setItem('adminKey', adminKey);
+  }
+  
+  try {
+    const response = await fetch('/api/agents', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-key': adminKey,
+      },
+      body: JSON.stringify({
+        api_key: apiKey,
+        machine_name: machineName,
+        display_name: displayName,
+      }),
+    });
+    
+    if (response.ok) {
+      msgDiv.style.display = 'block';
+      msgDiv.style.background = '#f0fdf4';
+      msgDiv.style.color = '#166534';
+      msgDiv.textContent = '✅ Thêm agent thành công! Đang tải lại...';
+      setTimeout(() => {
+        fetchData();
+        closeAddAgentModal();
+      }, 1500);
+    } else if (response.status === 409) {
+      msgDiv.style.display = 'block';
+      msgDiv.style.background = '#fef2f2';
+      msgDiv.style.color = '#991b1b';
+      msgDiv.textContent = '❌ API Key này đã tồn tại';
+    } else if (response.status === 401) {
+      msgDiv.style.display = 'block';
+      msgDiv.style.background = '#fef2f2';
+      msgDiv.style.color = '#991b1b';
+      msgDiv.textContent = '❌ Admin Key không hợp lệ';
+      adminKey = '';  // Reset admin key
+      sessionStorage.removeItem('adminKey');
+    } else {
+      msgDiv.style.display = 'block';
+      msgDiv.style.background = '#fef2f2';
+      msgDiv.style.color = '#991b1b';
+      msgDiv.textContent = '❌ Lỗi thêm agent';
+    }
+  } catch(e) {
+    msgDiv.style.display = 'block';
+    msgDiv.style.background = '#fef2f2';
+    msgDiv.style.color = '#991b1b';
+    msgDiv.textContent = '❌ Lỗi: ' + e.message;
+  }
+}
+
+async function deleteAgent(apiKey) {
+  if (!confirm(`Xóa agent '${apiKey}'?`)) return;
+  
+  // Nếu chưa nhập admin key, hỏi
+  if (!adminKey) {
+    adminKey = prompt('Nhập Admin Key (Dashboard Secret Key):');
+    if (!adminKey) return;
+    sessionStorage.setItem('adminKey', adminKey);
+  }
+  
+  try {
+    const response = await fetch(`/api/agents/${apiKey}`, {
+      method: 'DELETE',
+      headers: {
+        'x-admin-key': adminKey,
+      },
+    });
+    
+    if (response.ok) {
+      fetchData();
+      // Nếu modal quản lý endpoints đang mở, làm mới danh sách
+      if (document.getElementById('endpointManagementModal').style.display === 'block') {
+        refreshEndpointList();
+      }
+    } else if (response.status === 401) {
+      alert('❌ Admin Key không hợp lệ');
+      adminKey = '';
+      sessionStorage.removeItem('adminKey');
+    } else {
+      alert('❌ Lỗi xóa agent');
+    }
+  } catch(e) {
+    alert('❌ Lỗi: ' + e.message);
+  }
+}
+
+// Click ngoài modal để đóng
+document.addEventListener('DOMContentLoaded', function() {
+  const addModal = document.getElementById('addAgentModal');
+  const endpointModal = document.getElementById('endpointManagementModal');
+  
+  if (addModal) {
+    addModal.addEventListener('click', function(e) {
+      if (e.target === addModal) closeAddAgentModal();
+    });
+  }
+  
+  if (endpointModal) {
+    endpointModal.addEventListener('click', function(e) {
+      if (e.target === endpointModal) closeEndpointManagement();
+    });
+  }
+});
+
+// ════════════════════════════════════
+// Endpoint Management
+// ════════════════════════════════════
+function openEndpointManagement() {
+  document.getElementById('endpointManagementModal').style.display = 'block';
+  refreshEndpointList();
+}
+
+function closeEndpointManagement() {
+  document.getElementById('endpointManagementModal').style.display = 'none';
+}
+
+async function refreshEndpointList() {
+  try {
+    const response = await fetch('/api/agents');
+    const agents = await response.json();
+    renderEndpointTable(agents);
+  } catch(e) {
+    console.error('Error refreshing endpoints:', e);
+  }
+}
+
+function renderEndpointTable(agents) {
+  const tbody = document.getElementById('endpointTableBody');
+  
+  if (!agents || agents.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#94a3b8;">Không có endpoints</td></tr>';
+    return;
+  }
+  
+  tbody.innerHTML = agents.map(agent => {
+    const isOnline = agent.is_online;
+    const statusBadge = isOnline 
+      ? '<span style="background:#f0fdf4;color:#166534;padding:3px 8px;border-radius:4px;font-weight:600;font-size:11px;">🟢 Online</span>'
+      : '<span style="background:#fef2f2;color:#991b1b;padding:3px 8px;border-radius:4px;font-weight:600;font-size:11px;">⚫ Offline</span>';
+    
+    const lastConn = agent.last_connection 
+      ? new Date(agent.last_connection).toLocaleString('vi-VN')
+      : '<span style="color:#94a3b8;">Chưa kết nối</span>';
+    
+    const created = new Date(agent.created_at).toLocaleDateString('vi-VN');
+    
+    return `
+      <tr style="border-bottom:1px solid var(--border);hover:background:#f8fafc;">
+        <td style="padding:12px;">${statusBadge}</td>
+        <td style="padding:12px;font-weight:600;color:var(--text);">${agent.display_name}</td>
+        <td style="padding:12px;color:var(--muted);">${agent.machine_name}</td>
+        <td style="padding:12px;font-family:monospace;font-size:11px;">
+          <div style="display:flex;gap:4px;align-items:center;">
+            <code style="background:#f8fafc;padding:2px 6px;border-radius:3px;color:#3730a3;">${agent.api_key}</code>
+            <button onclick="copyToClipboard('${agent.api_key}')" style="background:none;border:none;cursor:pointer;font-size:12px;" title="Copy">📋</button>
+          </div>
+        </td>
+        <td style="padding:12px;color:var(--muted);font-size:11px;">${lastConn}</td>
+        <td style="padding:12px;color:var(--muted);font-size:11px;">${created}</td>
+        <td style="padding:12px;">
+          <button onclick="deleteAgent('${agent.api_key}')" style="padding:4px 8px;background:#991b1b;color:#fef2f2;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-weight:600;">🗑 Xóa</button>
+        </td>
+      </tr>
+    `;
+  }).join('');
+}
+
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    alert('✅ Đã copy API Key');
+  }).catch(() => {
+    alert('❌ Lỗi copy');
+  });
+}
 
 // ════════════════════════════════════
 // Bootstrap

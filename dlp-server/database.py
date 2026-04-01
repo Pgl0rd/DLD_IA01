@@ -39,6 +39,16 @@ def init_db():
             is_clipboard INTEGER
         )
     """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS agents (
+            api_key      TEXT    PRIMARY KEY,
+            machine_name TEXT    NOT NULL,
+            display_name TEXT    NOT NULL,
+            status       TEXT    NOT NULL DEFAULT 'active',
+            created_at   TEXT    NOT NULL,
+            last_connection TEXT
+        )
+    """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_received  ON events(received_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_action    ON events(action)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_risk      ON events(risk_score)")
@@ -191,3 +201,103 @@ def get_machines() -> list[str]:
     rows = conn.execute("SELECT DISTINCT machine_name FROM events ORDER BY machine_name").fetchall()
     conn.close()
     return [r[0] for r in rows]
+
+
+# ============================================================
+# AGENT MANAGEMENT
+# ============================================================
+
+def insert_agent(api_key: str, machine_name: str, display_name: str) -> bool:
+    """Thêm agent mới. Trả về True nếu thêm thành công."""
+    try:
+        conn = get_conn()
+        conn.execute("""
+            INSERT INTO agents (api_key, machine_name, display_name, status, created_at)
+            VALUES (?, ?, ?, 'active', ?)
+        """, (api_key, machine_name, display_name, datetime.utcnow().isoformat()))
+        conn.commit()
+        conn.close()
+        return True
+    except sqlite3.IntegrityError:
+        return False
+
+
+def get_agents() -> list[dict]:
+    """Lấy danh sách tất cả agents."""
+    conn = get_conn()
+    rows = conn.execute("""
+        SELECT api_key, machine_name, display_name, status, created_at, last_connection
+        FROM agents ORDER BY display_name
+    """).fetchall()
+    conn.close()
+    
+    result = []
+    for r in rows:
+        is_online = is_agent_online(r[5])  # check last_connection
+        result.append({
+            "api_key": r[0],
+            "machine_name": r[1],
+            "display_name": r[2],
+            "status": r[3],
+            "created_at": r[4],
+            "last_connection": r[5],
+            "is_online": is_online,
+        })
+    return result
+
+
+def get_agent(api_key: str) -> Optional[dict]:
+    """Lấy thông tin agent theo key."""
+    conn = get_conn()
+    row = conn.execute("""
+        SELECT api_key, machine_name, display_name, status, created_at, last_connection
+        FROM agents WHERE api_key = ?
+    """, (api_key,)).fetchone()
+    conn.close()
+    
+    if not row:
+        return None
+    
+    is_online = is_agent_online(row[5])
+    return {
+        "api_key": row[0],
+        "machine_name": row[1],
+        "display_name": row[2],
+        "status": row[3],
+        "created_at": row[4],
+        "last_connection": row[5],
+        "is_online": is_online,
+    }
+
+
+def update_agent_last_connection(api_key: str):
+    """Cập nhật thời gian kết nối cuối cùng cho agent."""
+    conn = get_conn()
+    conn.execute("""
+        UPDATE agents SET last_connection = ? WHERE api_key = ?
+    """, (datetime.utcnow().isoformat(), api_key))
+    conn.commit()
+    conn.close()
+
+
+def delete_agent(api_key: str) -> bool:
+    """Xóa agent. Trả về True nếu tồn tại và đã xóa."""
+    conn = get_conn()
+    cursor = conn.execute("DELETE FROM agents WHERE api_key = ?", (api_key,))
+    conn.commit()
+    success = cursor.rowcount > 0
+    conn.close()
+    return success
+
+
+def is_agent_online(last_connection: Optional[str], timeout_seconds: int = 60) -> bool:
+    """Kiểm tra agent còn online không (kết nối trong vòng timeout_seconds)."""
+    if not last_connection:
+        return False
+    try:
+        last_ts = datetime.fromisoformat(last_connection)
+        now = datetime.utcnow()
+        delta = (now - last_ts).total_seconds()
+        return delta < timeout_seconds
+    except:
+        return False
