@@ -775,6 +775,28 @@ class DetectionEngine:
                         f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
                     )
             
+            # 3.6. UEBA ML Anomaly Detection cho clipboard (context-based & transformation cases)
+            ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
+            if self.ml_analyzer.is_available():
+                try:
+                    recent_history = self.event_history[-150:] if len(self.event_history) > 150 else self.event_history
+                    ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
+                    if ml_anomaly_result.get('is_anomaly', False):
+                        anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
+                        logger.warning(
+                            f"UEBA Anomaly Detected (Clipboard): score={anomaly_score:.2f} "
+                            f"reasons={ml_anomaly_result.get('profile_reasons', [])}"
+                        )
+                except Exception as e:
+                    logger.error(f"Error in ML anomaly detection (clipboard): {e}")
+            try:
+                ml_score_0_10 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = ml_score_0_10
+                deep_analysis_result['ml_is_anomaly'] = bool(ml_anomaly_result.get('is_anomaly', False))
+                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_10 / 5.0) - 1.0))
+            except Exception:
+                pass
+
             # 4. Risk Scoring với context đặc biệt cho clipboard
             ctx = event.get('context', {}) or {}
             raw_ctx = raw_original.get('context', {}) or {}
@@ -826,6 +848,8 @@ class DetectionEngine:
                 # Behavioral rules context
                 'behavioral_risk_boost': behavioral_risk_boost,
                 'behavioral_details': behavioral_details,
+                'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
+                'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
                 # Event data for risk scoring (IOC hits, etc.)
                 '_event_data': event
             }
