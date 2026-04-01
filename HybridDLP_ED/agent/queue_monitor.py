@@ -1,6 +1,8 @@
 # agent/queue_monitor.py
-import time
+import errno
 import json
+import os
+import time
 from pathlib import Path
 
 class QueueMonitor:
@@ -24,6 +26,25 @@ class QueueMonitor:
         self.last_state = None
 
         self.stats_file = self.state_dir / "sensor_stats.json"
+
+    def _atomic_replace(self, src: Path, dst: Path) -> None:
+        """os.replace com retry no Windows quando o destino está bloqueado (antivírus/leitor)."""
+        retry_errnos = {errno.EACCES, errno.EPERM}
+        if hasattr(errno, "EBUSY"):
+            retry_errnos.add(errno.EBUSY)
+        last: OSError | None = None
+        for attempt in range(12):
+            try:
+                os.replace(src, dst)
+                return
+            except OSError as e:
+                last = e
+                if e.errno in retry_errnos and attempt < 11:
+                    time.sleep(0.05 * (attempt + 1))
+                    continue
+                raise
+        assert last is not None
+        raise last
 
     def loop(self, stop_event):
         while not stop_event.is_set():
@@ -52,7 +73,14 @@ class QueueMonitor:
             if state != self.last_state:
                 tmp = self.stats_file.with_suffix(".tmp")
                 tmp.write_text(json.dumps(state, ensure_ascii=False), encoding="utf-8")
-                tmp.replace(self.stats_file)
+                try:
+                    self._atomic_replace(tmp, self.stats_file)
+                finally:
+                    if tmp.exists():
+                        try:
+                            tmp.unlink()
+                        except OSError:
+                            pass
                 self.last_state = state
 
             time.sleep(self.check_interval_sec)
