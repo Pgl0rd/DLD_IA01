@@ -50,9 +50,15 @@ init_agents()
 # ---- Helper xác thực ----
 def require_agent(x_api_key: str | None) -> str:
     """Trả về machine_name nếu hợp lệ, raise 401 nếu không."""
-    if not x_api_key or x_api_key not in AGENT_KEYS:
+    if not x_api_key:
         raise HTTPException(status_code=401, detail="Invalid API key")
-    return AGENT_KEYS[x_api_key]
+    
+    # Check database thay vì chỉ check AGENT_KEYS
+    agent = get_agent(x_api_key)
+    if not agent:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    
+    return agent["machine_name"]
 
 
 def require_dashboard(x_admin_key: str | None) -> bool:
