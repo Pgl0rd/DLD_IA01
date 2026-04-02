@@ -82,6 +82,16 @@ class SystemTrayApp:
         """Show worker status."""
         status = "🟢 Running" if self.manager.is_worker_running() else "🔴 Stopped"
         print(f"[Worker] Status: {status}")
+
+    def _on_start_worker(self, icon, item):
+        """Start worker from tray."""
+        success, msg = self.manager.start_worker()
+        print(f"[Worker] Start: {msg}")
+
+    def _on_stop_worker(self, icon, item):
+        """Stop worker from tray."""
+        success, msg = self.manager.stop_worker()
+        print(f"[Worker] Stop: {msg}")
     
     def _on_exit(self, icon, item):
         """Exit application."""
@@ -129,12 +139,20 @@ class SystemTrayApp:
                 "Worker",
                 Menu(
                     MenuItem(
+                        "Start",
+                        self._on_start_worker
+                    ),
+                    MenuItem(
+                        "Stop",
+                        self._on_stop_worker
+                    ),
+                    MenuItem(
                         f"Status: {worker_status}",
                         self._on_worker_status,
                         enabled=False
                     ),
                 )
-            ),
+            ) ,
             MenuItem(
                 "---",
                 lambda: None,
@@ -159,14 +177,15 @@ class SystemTrayApp:
             self.icon = Icon("HybridDLP", image, menu=self._create_menu())
             self.running = True
             
-            # Chạy icon ở background thread
+            # Chạy icon ở non-daemon thread (không phải daemon thread)
+            # pystray cần chạy ở thread chính để tránh Tkinter errors
             def run_icon():
                 try:
                     self.icon.run()
                 except Exception as e:
                     print(f"❌ Tray icon error: {e}")
             
-            self.tray_thread = threading.Thread(target=run_icon, daemon=True)
+            self.tray_thread = threading.Thread(target=run_icon, daemon=False)
             self.tray_thread.start()
             
             return True

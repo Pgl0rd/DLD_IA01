@@ -18,6 +18,7 @@ if str(_ROOT) not in sys.path:
 from agent.password_manager import is_password_set
 from agent.setup_wizard import run_setup_wizard
 from agent.system_tray_app import show_system_tray
+from agent.service_manager import get_service_manager
 
 
 def main():
@@ -45,6 +46,17 @@ def main():
     else:
         print("[Boot] Configuration already set")
     
+    # Try auto-start worker (for popup/control center startup convenience)
+    try:
+        manager = get_service_manager()
+        success, msg = manager.start_worker()
+        if success:
+            print(f"[Boot] Auto-start worker succeeded: {msg}")
+        else:
+            print(f"[Boot] Auto-start worker failed: {msg}")
+    except Exception as e:
+        print(f"[Boot] Auto-start worker exception: {e}")
+
     # Run system tray
     print("\n[Boot] Starting System Tray Application...")
     

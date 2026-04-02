@@ -82,7 +82,7 @@ class DLPSender:
         self._running = True
         self._thread = threading.Thread(target=self._worker, daemon=True)
         self._thread.start()
-        print(f"[DLPSender] Started → {SERVER_URL}")
+        print(f"[DLPSender] Started -> {SERVER_URL}")
 
 
     def stop(self):

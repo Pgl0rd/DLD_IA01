@@ -32,20 +32,19 @@ class ServiceManager:
             if self.sensor_process and self.sensor_process.poll() is None:
                 return False, "Sensor đang chạy"
             
-            # Chạy: python -m agent
+            # Chạy: python -m agent.sensor
             self.sensor_process = subprocess.Popen(
-                [self._get_python_executable(), "-m", "agent"],
+                [self._get_python_executable(), "-m", "agent.sensor"],
                 cwd=str(PROJECT_ROOT),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
             
             # Chờ xem có crash không
             time.sleep(2)
             if self.sensor_process.poll() is not None:
-                _, err = self.sensor_process.communicate()
-                return False, f"Sensor khởi động thất bại: {err.decode()[:200]}"
+                return False, "Sensor khởi động thất bại"
             
             return True, "Sensor đã khởi động"
         except Exception as e:
@@ -57,16 +56,13 @@ class ServiceManager:
             if not self.sensor_process or self.sensor_process.poll() is not None:
                 return False, "Sensor không chạy"
             
-            if sys.platform == "win32":
-                os.killpg(os.getpgid(self.sensor_process.pid), 9)
-            else:
+            try:
                 self.sensor_process.terminate()
+                self.sensor_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.sensor_process.kill()
             
-            self.sensor_process.wait(timeout=5)
             return True, "Sensor đã tắt"
-        except subprocess.TimeoutExpired:
-            self.sensor_process.kill()
-            return True, "Sensor đã dừng (force)"
         except Exception as e:
             return False, f"Lỗi tắt Sensor: {e}"
     
@@ -75,54 +71,55 @@ class ServiceManager:
         return self.sensor_process is not None and self.sensor_process.poll() is None
     
     def start_worker(self) -> Tuple[bool, str]:
-        """Khởi động Worker (Docker)."""
+        """Khởi động Worker."""
         try:
-            # Chạy: docker-compose up -d worker
-            result = subprocess.run(
-                ["docker-compose", "up", "-d", "worker"],
+            if self.worker_process and self.worker_process.poll() is None:
+                return False, "Worker đang chạy"
+            
+            # Chạy: python worker/worker.py
+            log_path = PROJECT_ROOT / "worker_process.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+
+            self.worker_process = subprocess.Popen(
+                [self._get_python_executable(), "worker/worker.py"],
                 cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
+                stdout=open(log_path, "a", encoding="utf-8"),
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0,
             )
             
-            if result.returncode == 0:
-                return True, "Worker đã khởi động"
-            else:
-                return False, f"Lỗi khởi động Worker: {result.stderr[:200]}"
-        except FileNotFoundError:
-            return False, "Docker Compose không tìm thấy"
+            # Chờ xem có crash không (tăng timeout để worker khởi động)
+            time.sleep(3)
+            if self.worker_process.poll() is not None:
+                try:
+                    text = log_path.read_text(encoding="utf-8", errors="ignore")[-2000:]
+                    return False, f"Worker khởi động thất bại. Xem {log_path}.\n{text}"
+                except Exception:
+                    return False, "Worker khởi động thất bại (xem worker_process.log)."
+            
+            return True, "Worker đã khởi động"
         except Exception as e:
             return False, f"Lỗi khởi động Worker: {e}"
     
     def stop_worker(self) -> Tuple[bool, str]:
-        """Tắt Worker (Docker)."""
+        """Tắt Worker."""
         try:
-            result = subprocess.run(
-                ["docker-compose", "stop", "worker"],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-            )
+            if not self.worker_process or self.worker_process.poll() is not None:
+                return False, "Worker không chạy"
             
-            if result.returncode == 0:
-                return True, "Worker đã tắt"
-            else:
-                return False, f"Lỗi tắt Worker: {result.stderr[:200]}"
+            try:
+                self.worker_process.terminate()
+                self.worker_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.worker_process.kill()
+            
+            return True, "Worker đã tắt"
         except Exception as e:
             return False, f"Lỗi tắt Worker: {e}"
     
     def is_worker_running(self) -> bool:
         """Kiểm tra Worker có chạy không."""
-        try:
-            result = subprocess.run(
-                ["docker-compose", "ps", "-q", "worker"],
-                cwd=str(PROJECT_ROOT),
-                capture_output=True,
-                text=True,
-            )
-            return result.returncode == 0 and len(result.stdout.strip()) > 0
-        except:
-            return False
+        return self.worker_process is not None and self.worker_process.poll() is None
 
 
 _service_manager = ServiceManager()

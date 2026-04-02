@@ -128,7 +128,7 @@ class MainWindow:
         ttk.Button(sensor_btn_frame, text="🔄 Refresh", command=self._update_sensor_status).pack(side=tk.LEFT)
         
         # Worker section
-        worker_frame = ttk.LabelFrame(self.main_frame, text="Worker (Docker)", padding=10)
+        worker_frame = ttk.LabelFrame(self.main_frame, text="Worker", padding=10)
         worker_frame.pack(fill=tk.X, pady=(0, 10))
         
         self.worker_status_label = ttk.Label(worker_frame, text="", font=("Segoe UI", 10))
