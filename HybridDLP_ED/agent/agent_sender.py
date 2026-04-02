@@ -34,13 +34,21 @@ import queue
 import time
 import json
 import os
+from pathlib import Path
+import sys
 
+# Thêm parent dir để import agent.*
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from agent.config import get_server_url, get_api_key
 
 # ============================================================
-# CONFIG — sửa 2 dòng này cho phù hợp
+# CONFIG — đọc từ config.json (quản lý bởi setup wizard)
 # ============================================================
-SERVER_URL = os.getenv("DLP_SERVER_URL", "http://100.91.22.25:8000")   # IP Tailscale của máy admin
-API_KEY    = os.getenv("DLP_API_KEY",    "dlp-key-may-ketoan-01")    # Key của máy này
+SERVER_URL = get_server_url()   # IP Tailscale của máy admin
+API_KEY    = get_api_key()      # Key của máy này
 # ============================================================
 
 
