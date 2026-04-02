@@ -42,14 +42,35 @@ class WindowsNotification:
     
     def _detect_best_method(self) -> str:
         """Detect best available notification method"""
+        # Optional override for debugging/UX tuning:
+        # DLP_NOTIFICATION_METHOD = win32_messagebox | win10toast | plyer | console
+        try:
+            import os
+
+            forced = os.getenv("DLP_NOTIFICATION_METHOD", "").strip().lower()
+        except Exception:
+            forced = ""
+
+        if forced in {"win32_messagebox", "win10toast", "plyer", "console"}:
+            if forced == "win32_messagebox" and WIN32_AVAILABLE:
+                return "win32_messagebox"
+            if forced == "win10toast" and WIN10TOAST_AVAILABLE:
+                return "win10toast"
+            if forced == "plyer" and PLYER_AVAILABLE:
+                return "plyer"
+            if forced == "console":
+                return "console"
+
+        # Prefer MessageBox: win10toast has been observed to crash on some environments
+        # (e.g. AttributeError: 'ToastNotifier' object has no attribute 'classAtom',
+        # and other WNDPROC-related issues). MessageBox is blocking but reliable.
+        if WIN32_AVAILABLE:
+            return 'win32_messagebox'
         if WIN10TOAST_AVAILABLE:
             return 'win10toast'
-        elif PLYER_AVAILABLE:
+        if PLYER_AVAILABLE:
             return 'plyer'
-        elif WIN32_AVAILABLE:
-            return 'win32_messagebox'
-        else:
-            return 'console'  # Fallback to console
+        return 'console'  # Fallback to console
     
     def show_alert(self, 
                    title: str,
@@ -94,11 +115,26 @@ class WindowsNotification:
                 msg=message,
                 duration=duration,
                 icon_path=None,  # Có thể thêm icon sau
-                threaded=True
+                # important: use threaded=False so exceptions propagate to this call.
+                # win10toast can crash inside its internal thread (AttributeError: classAtom),
+                # and that exception would bypass our try/except if threaded=True.
+                threaded=False
             )
             return True
         except Exception as e:
-            logger.error(f"win10toast error: {e}")
+            logger.error(f"win10toast error (will fallback): {e}")
+            # Fallback to other Windows notification methods (best-effort).
+            if PLYER_AVAILABLE:
+                try:
+                    return self._show_plyer(title, message, duration)
+                except Exception:
+                    pass
+            if WIN32_AVAILABLE:
+                try:
+                    return self._show_win32_messagebox(title, message, severity="warning")
+                except Exception:
+                    pass
+            logger.warning("No notification fallback available; showing via console only")
             return False
     
     def _show_plyer(self, title: str, message: str, duration: int) -> bool:
