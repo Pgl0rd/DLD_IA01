@@ -45,6 +45,8 @@ psapi = ctypes.WinDLL("psapi", use_last_error=True)
 
 CF_UNICODETEXT = 13
 CF_HDROP = 15  # file drop list
+CF_DIB = 8    # device-independent bitmap (screenshot stays in clipboard as DIB)
+CF_BITMAP = 2  # raw bitmap handle
 
 # clipboard
 user32.GetClipboardSequenceNumber.restype = wintypes.DWORD
@@ -548,6 +550,71 @@ def _read_clipboard_file_list(timeout_ms: int = 120, max_files: int = 50) -> Tup
         return out, None
     finally:
         user32.CloseClipboard()
+
+
+# =========================
+# Screenshot helpers (Clipboard Image)
+# =========================
+def _read_clipboard_image_pil():
+    """
+    Kiểm tra clipboard có chứa ảnh không và trả về PIL.Image object.
+    Dùng ImageGrab.grabclipboard() của Pillow — đơn giản và đáng tin cậy trên Windows.
+    Trả về (Image | None, err_str | None)
+    """
+    try:
+        from PIL import ImageGrab
+        img = ImageGrab.grabclipboard()
+        if img is None:
+            return None, None  # clipboard không có ảnh
+        # grabclipboard() có thể trả về list[str] (file list) — bỏ qua
+        from PIL import Image
+        if isinstance(img, list):
+            return None, None
+        if not isinstance(img, Image.Image):
+            return None, None
+        return img, None
+    except ImportError:
+        return None, "Pillow not installed"
+    except Exception as e:
+        return None, str(e)
+
+
+def _get_screenshot_dir() -> Optional[str]:
+    """Lấy thư mục lưu screenshot từ WorkerConfig (dynamic, machine-independent)."""
+    try:
+        import sys as _sys
+        from pathlib import Path as _Path
+        # Worker config shares the same base path
+        _agent_dir = _Path(__file__).parent.parent
+        _screenshot_dir = _agent_dir / "runtime" / "screenshots"
+        _screenshot_dir.mkdir(parents=True, exist_ok=True)
+        return str(_screenshot_dir)
+    except Exception:
+        # Fallback: same dir as this file
+        try:
+            import tempfile
+            return tempfile.gettempdir()
+        except Exception:
+            return None
+
+
+def _save_screenshot(img) -> Optional[str]:
+    """
+    Lưu ảnh từ PIL.Image vào thư mục screenshots.
+    Trả về đường dẫn file đã lưu hoặc None nếu thất bại.
+    """
+    try:
+        import uuid as _uuid
+        from pathlib import Path as _Path
+        scr_dir = _get_screenshot_dir()
+        if not scr_dir:
+            return None
+        filename = f"screenshot_{_uuid.uuid4().hex[:12]}.png"
+        file_path = str(_Path(scr_dir) / filename)
+        img.save(file_path, format="PNG")
+        return file_path
+    except Exception:
+        return None
 
 
 # =========================
@@ -1243,6 +1310,53 @@ class ClipboardSensor:
                     self._last_emit_ts = now
                     time.sleep(self.poll_interval_sec)
                     continue
+
+                # ---- screenshot (bitmap image in clipboard) ----
+                # Phát hiện ảnh trong clipboard (Snipping Tool / PrtSc / Win+Shift+S)
+                _img, _img_err = _read_clipboard_image_pil()
+                if _img is not None:
+                    saved_path = _save_screenshot(_img)
+                    if saved_path:
+                        # Xác định source (cửa sổ nào đang active khi chụp)
+                        _fg = _get_foreground_process_info()
+                        _fg_app = _coalesce_str(_fg.get("fg_app"), _fg.get("fg_process")) or "unknown"
+                        _win_title = _coalesce_str(_fg.get("window_title")) or ""
+                        # Nhận dạng nguồn: Snipping Tool hay PrintScreen
+                        _source_hint = "SnippingTool" if any(
+                            k in _win_title.lower()
+                            for k in ("snip", "snipping", "screenshot", "capture", "snipingtool")
+                        ) else "PrintScreen"
+                        _scrn_evt: Dict[str, Any] = {
+                            "type": "screenshot",
+                            "source": self.source,
+                            "severity": "info",
+                            "ts": _utc_iso(now),
+                            "timestamp": _utc_iso(now),
+                            "file_path": saved_path,
+                            "screenshot": {
+                                "file_path": saved_path,
+                                "source": _source_hint,
+                                "width": _img.width,
+                                "height": _img.height,
+                            },
+                            "context": copy_ctx,
+                            "actor": self._actor_from_ctx(copy_ctx),
+                            "operation": {
+                                "op_type": "screenshot",
+                                "tool": _fg_app,
+                            },
+                        }
+                        self._emit(_scrn_evt)
+                        self._last_emit_ts = now
+                        # Không reset _last_seq — ta vẫn muốn xử lý text nếu có
+                        # nhưng tránh emit lại screenshot giống nhau
+                        typed_hash_img = self._typed_hash("image", f"{_img.width}x{_img.height}:{_img.tobytes()[:64].hex()}")
+                        if typed_hash_img == self._last_hash:
+                            time.sleep(self.poll_interval_sec)
+                            continue
+                        self._last_hash = typed_hash_img
+                        time.sleep(self.poll_interval_sec)
+                        continue
 
                 # Try text
                 text, terr = _read_clipboard_text(timeout_ms=120)

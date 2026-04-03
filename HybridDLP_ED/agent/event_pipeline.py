@@ -184,7 +184,7 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
     obj0 = evt.get("object") if isinstance(evt.get("object"), dict) else {}
 
     obj = {
-        "path": evt.get("path") or legacy_file.get("path") or obj0.get("path") or evt.get("File_Path"),
+        "path": evt.get("path") or evt.get("file_path") or legacy_file.get("path") or obj0.get("path") or evt.get("File_Path"),
         "dst_path": evt.get("dst_path") or legacy_file.get("dst_path") or obj0.get("dst_path") or evt.get("Dest_Path"),
         "name": obj0.get("name") or evt.get("File_Name"),
         "ext": evt.get("ext") or legacy_file.get("ext") or obj0.get("ext") or evt.get("File_Extension"),
@@ -223,6 +223,7 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
     content0 = evt.get("content") if isinstance(evt.get("content"), dict) else {}
 
     clipboard0 = evt.get("clipboard") if isinstance(evt.get("clipboard"), dict) else {}
+    screenshot0 = evt.get("screenshot") if isinstance(evt.get("screenshot"), dict) else {}
     usb0 = evt.get("usb") if isinstance(evt.get("usb"), dict) else {}
     print0 = evt.get("print") if isinstance(evt.get("print"), dict) else {}
     network0 = evt.get("network") if isinstance(evt.get("network"), dict) else {}
@@ -284,6 +285,7 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
         },
 
         "clipboard": clipboard0,
+        "screenshot": screenshot0,
         "usb": usb0,
         "print": print0,
         "network": {
