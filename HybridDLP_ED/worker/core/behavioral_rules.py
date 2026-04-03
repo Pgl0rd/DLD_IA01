@@ -7,6 +7,7 @@ from loguru import logger
 import re
 from datetime import datetime, time
 from pathlib import Path
+from .config_provider import get_config_provider
 
 
 class BehavioralRule:
@@ -46,157 +47,21 @@ class ClipboardPasteToExternalAppRule(BehavioralRule):
             description="Paste dữ liệu nhạy cảm vào ứng dụng bên ngoài (GPT, Discord, Zalo, etc.)",
             severity="high"
         )
-        # Browser apps that can access external web
-        self.browser_apps = {
-            "chrome.exe",
-            "msedge.exe",
-            "firefox.exe",
-            "brave.exe",
-            "opera.exe",
-            "vivaldi.exe"
-        }
         
-        # Messaging / Desktop Apps (should also be detected)
-        self.messaging_apps = {
-            "teams.exe",
-            "slack.exe",
-            "discord.exe",
-            "telegram.exe",
-            "whatsapp.exe",
-            "line.exe",
-            "signal.exe",
-            "skype.exe",
-            "zalo.exe"
-        }
+        # Load config từ config_provider (ưu tiên config_sync từ server, fallback to local)
+        config_provider = get_config_provider()
+        self.browser_apps = config_provider.get_browser_apps()
+        self.messaging_apps = config_provider.get_messaging_apps()
+        self.sensitive_domains = config_provider.get_sensitive_domains()
+        self.sensitive_title_keywords = config_provider.get_sensitive_title_keywords()
         
-        # Sensitive destinations (web/chat/mail) - Full List
-        self.sensitive_domains = {
-            # AI / LLM Tools
-            "chat.openai.com",
-            "chatgpt.com",
-            "claude.ai",
-            "gemini.google.com",
-            "bard.google.com",
-            "perplexity.ai",
-            "poe.com",
-            "copilot.microsoft.com",
-            "phind.com",
-            "you.com",
-            # Email Services
-            "mail.google.com",
-            "gmail.com",
-            "outlook.office.com",
-            "outlook.live.com",
-            "mail.yahoo.com",
-            "mail.proton.me",
-            "protonmail.com",
-            "zoho.com",
-            "yandex.com",
-            # Cloud Storage
-            "drive.google.com",
-            "docs.google.com",
-            "dropbox.com",
-            "onedrive.live.com",
-            "mega.nz",
-            "box.com",
-            "icloud.com",
-            "pcloud.com",
-            "sync.com",
-            # Temporary File Transfer
-            "wetransfer.com",
-            "transfer.sh",
-            "file.io",
-            "sendgb.com",
-            "wormhole.app",
-            "sendspace.com",
-            "mediafire.com",
-            "zippyshare.com",
-            # Messaging / Chat
-            "web.whatsapp.com",
-            "discord.com",
-            "teams.microsoft.com",
-            "slack.com",
-            "messenger.com",
-            "facebook.com/messages",
-            "telegram.org",
-            "web.telegram.org",
-            "line.me",
-            "signal.org",
-            # Vietnam Popular Messaging
-            "zalo.me",
-            "chat.zalo.me",
-            # Social Media
-            "facebook.com",
-            "instagram.com",
-            "twitter.com",
-            "x.com",
-            "tiktok.com",
-            "linkedin.com",
-            "reddit.com",
-            "threads.net",
-            # Code Sharing / Paste
-            "gist.github.com",
-            "pastebin.com",
-            "hastebin.com",
-            "gitlab.com",
-            "bitbucket.org",
-            "replit.com"
-        }
-        
-        # Sensitive keywords in window title - Full List
-        self.sensitive_title_keywords = [
-            # AI tools
-            "chatgpt",
-            "claude",
-            "gemini",
-            "bard",
-            "perplexity",
-            "poe ai",
-            "copilot",
-            # Email
-            "gmail",
-            "google mail",
-            "outlook",
-            "outlook mail",
-            "yahoo mail",
-            "proton mail",
-            # Cloud
-            "google drive",
-            "dropbox",
-            "onedrive",
-            "mega",
-            "box",
-            "icloud",
-            # Messaging / Chat
-            "slack",
-            "teams",
-            "discord",
-            "telegram",
-            "whatsapp",
-            "messenger",
-            "line",
-            "signal",
-            # Vietnam chat apps
-            "zalo",
-            # Social media
-            "facebook",
-            "instagram",
-            "twitter",
-            "linkedin",
-            "tiktok",
-            "reddit",
-            "threads",
-            # Code sharing
-            "pastebin",
-            "github gist",
-            "gitlab",
-            "bitbucket",
-            "replit",
-            # File sharing
-            "wetransfer",
-            "sendspace",
-            "mediafire"
-        ]
+        logger.info(
+            f"ClipboardPasteToExternalAppRule initialized with config: "
+            f"browser_apps={len(self.browser_apps)}, "
+            f"messaging_apps={len(self.messaging_apps)}, "
+            f"sensitive_domains={len(self.sensitive_domains)}, "
+            f"sensitive_title_keywords={len(self.sensitive_title_keywords)}"
+        )
     
     def _is_external_sink(self, event: Dict[str, Any]) -> bool:
         """
@@ -642,6 +507,10 @@ class USBDataExfiltrationRule(BehavioralRule):
     
     def check(self, event: Dict[str, Any], fast_scan_result: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """Check USB copy"""
+        # Load config từ config provider (unified interface)
+        config_provider = get_config_provider()
+        removable_drives = config_provider.get_removable_drives()
+        
         # Read from both event and raw_original (per Noteupdate.txt event samples)
         raw_original = event.get('raw_original', {}) or {}
         raw_obj = raw_original.get('object', {}) or {}
@@ -672,7 +541,7 @@ class USBDataExfiltrationRule(BehavioralRule):
         is_removable = (
             dest_volume_type and 'removable' in str(dest_volume_type).lower()
         ) or any(
-            drive in dest_path or drive in obj_drive for drive in ['e:', 'f:', 'g:', 'h:', 'i:', 'j:', 'k:', 'l:']
+            drive in dest_path or drive in obj_drive for drive in removable_drives
         )
         
         if not is_removable:
@@ -768,6 +637,9 @@ class NetworkUploadRule(BehavioralRule):
             return False, {}
         
         # -------- 3.2 External destination --------
+        # Load config từ config provider (unified interface)
+        config_provider = get_config_provider()
+        
         ctx = event.get("context", {}) or {}
         actor = event.get("actor", {}) or {}
         process_name = str(
@@ -786,35 +658,16 @@ class NetworkUploadRule(BehavioralRule):
         dest_domain = str(network.get("dest_domain") or "").lower()
         dest_ip = str(network.get("dest_ip") or "").lower()
         
-        # Browser / desktop upload apps / CLI tools
-        browser_apps = {"chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe"}
-        desktop_upload_apps = {
-            "slack.exe",
-            "teams.exe",
-            "discord.exe",
-            "onedrive.exe",
-            "dropbox.exe",
-            "outlook.exe",
-        }
-        cli_tools = {"curl", "powershell", "certutil", "scp", "winscp", "filezilla"}
+        # Browser / desktop upload apps / CLI tools - Load từ config
+        browser_apps = config_provider.get_network_browser_apps()
+        desktop_upload_apps = config_provider.get_desktop_upload_apps()
+        cli_tools = config_provider.get_cli_tools()
         
         is_browser = any(b in app for b in browser_apps)
         is_desktop_upload = any(d in app for d in desktop_upload_apps)
         is_cli_upload = any(t in process_name for t in cli_tools)
         
-        sensitive_domains = {
-            "chat.openai.com",
-            "chatgpt.com",
-            "gmail.com",
-            "mail.google.com",
-            "outlook.office.com",
-            "drive.google.com",
-            "dropbox.com",
-            "onedrive.live.com",
-            "slack.com",
-            "discord.com",
-            "pastebin.com",
-        }
+        sensitive_domains = config_provider.get_network_sensitive_domains()
         is_external_domain = bool(dest_domain) and (
             dest_domain in sensitive_domains or "." in dest_domain
         )
