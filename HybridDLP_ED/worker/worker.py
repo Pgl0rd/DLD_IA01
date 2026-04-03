@@ -34,6 +34,7 @@ from core.action_executor import ActionExecutor
 from core.report_generator import ReportGenerator
 from core.behavioral_rules import BehavioralRulesEngine
 from core.file_stability import wait_until_file_stable
+from core.ocr_setup import ensure_tesseract
 # Import ML module from ML folder
 ML_DIR = Path(__file__).parent.parent / "ML"
 if ML_DIR.exists():
@@ -86,6 +87,9 @@ class DetectionEngine:
     
     def __init__(self):
         logger.info("Initializing Detection Engine components...")
+
+        # Kiểm tra và cài Tesseract tự động nếu chưa có
+        ensure_tesseract()
 
         self.queue_consumer = _make_queue_consumer()
         self.hash_cache = HashCacheManager()
@@ -248,6 +252,12 @@ class DetectionEngine:
                 logger.debug(f"[PID={pid}] Skipping heartbeat event after normalization: event_id={event_id}")
                 return True
             
+            # ==== Xử lý Screenshot Events ====
+            # Phải kiểm tra TRƯỚC clipboard để screenshot không bị thuợc vào clipboard branch
+            is_screenshot_event = event_type.lower() == "screenshot"
+            if is_screenshot_event:
+                return self._process_screenshot_event(event)
+
             # ==== Xử lý Clipboard Events ====
             # Check nếu là clipboard event (clipboard_paste, clipboard_text, etc.)
             # Also check clipboard field exists
@@ -927,6 +937,217 @@ class DetectionEngine:
             logger.error(f"Error processing clipboard event: {e}", exc_info=True)
             return False
     
+    def _process_screenshot_event(self, event: dict) -> bool:
+        """
+        Xử lý screenshot event từ clipboard_sensor:
+        1. OCR ảnh chụp màn hình
+        2. YARA scan trên text vừa OCR
+        3. Risk Scoring & Action
+        4. Dọn file ảnh sau scan (nếu được cấu hình)
+        """
+        try:
+            event_id = event.get('event_id', 'unknown')
+            pid = os.getpid()
+            logger.info(f"[PID={pid}] Processing screenshot event: event_id={event_id}")
+
+            raw_original = event.get('raw_original') or {}
+            file_path_str = (
+                event.get('file_path') or
+                (event.get('screenshot') or {}).get('file_path') or
+                (event.get('object') or {}).get('path') or
+                raw_original.get('file_path') or
+                (raw_original.get('screenshot') or {}).get('file_path') or
+                ''
+            )
+            if not file_path_str:
+                logger.warning(f"[PID={pid}] Screenshot event has no file_path: event_id={event_id}")
+                return True
+
+            file_path = Path(file_path_str)
+            if not file_path.exists():
+                logger.warning(f"[PID={pid}] Screenshot file not found: {file_path}")
+                return True
+
+            # Check file size
+            size_bytes = file_path.stat().st_size
+            file_size_mb = size_bytes / (1024 * 1024)
+            if file_size_mb > WorkerConfig.OCR_MAX_FILE_SIZE_MB:
+                logger.debug(f"[PID={pid}] Screenshot too large for OCR: {file_size_mb:.2f}MB")
+                return True
+
+            panic_mode = self.queue_consumer.check_panic_mode()
+
+            # 1. OCR: trích xuất text từ ảnh
+            ocr_text = ""
+            if not panic_mode:
+                logger.info(f"[PID={pid}] Running OCR on screenshot: {file_path.name}")
+                extracted = self.deep_analysis.ocr_processor.extract_text(file_path)
+                if extracted:
+                    ocr_text = extracted.strip()
+                    logger.info(
+                        f"[PID={pid}] OCR extracted {len(ocr_text)} chars "
+                        f"from screenshot: {ocr_text[:100]!r}"
+                    )
+                else:
+                    logger.debug(f"[PID={pid}] OCR returned no text for {file_path.name}")
+
+            # 2. YARA scan trên text vừa OCR
+            if ocr_text:
+                fast_scan_result = self.fast_scan.scan_text_content(ocr_text, panic_mode)
+            else:
+                fast_scan_result = {'yara_matches': [], 'is_suspicious': False}
+
+            yara_matches = fast_scan_result.get('yara_matches', [])
+            if yara_matches:
+                logger.warning(
+                    f"[PID={pid}] Screenshot YARA matches ({len(yara_matches)}): "
+                    + ", ".join(m.get('rule', '?') for m in yara_matches)
+                )
+
+            # 3. Deep analysis hint
+            deep_analysis_result = {
+                'is_sensitive': bool(yara_matches),
+                'ocr_text': ocr_text or None,
+            }
+
+            # Behavioral rules
+            behavioral_matches = self.behavioral_rules.check_all(event, fast_scan_result)
+            behavioral_risk_boost = 0
+            behavioral_details = {}
+            if behavioral_matches:
+                highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest_match:
+                    severity_boost = WorkerConfig.BEHAVIORAL_RISK_BOOST
+                    behavioral_risk_boost = severity_boost.get(highest_match.get('severity', 'low'), 0)
+                    behavioral_details = {
+                        'behavioral_rule_matched': highest_match.get('rule'),
+                        'behavioral_reason': highest_match.get('reason', ''),
+                        'behavioral_severity': highest_match.get('severity'),
+                    }
+
+            # UEBA
+            ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
+            if self.ml_analyzer.is_available():
+                try:
+                    ml_anomaly_result = self.ml_analyzer.predict(
+                        event, event_history=self.event_history[-100:]
+                    )
+                except Exception as _e:
+                    logger.debug(f"ML anomaly error (screenshot): {_e}")
+            try:
+                ml_score_0_10 = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = ml_score_0_10
+                deep_analysis_result['ml_is_anomaly'] = bool(ml_anomaly_result.get('is_anomaly', False))
+                deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_10 / 5.0) - 1.0))
+            except Exception:
+                pass
+
+            # 4. Risk Scoring
+            ctx = event.get('context', {}) or {}
+            screenshot_meta = event.get('screenshot', {}) or {}
+            source_hint = screenshot_meta.get('source', 'screenshot')
+            event_context = {
+                'action_type': 'screenshot',
+                'destination': '',
+                'user': ctx.get('user') or event.get('actor', {}).get('user', 'unknown'),
+                'time': event.get('ts') or event.get('timestamp', ''),
+                'location': str(file_path.parent),
+                'file_size_mb': file_size_mb,
+                'process_name': ctx.get('fg_app') or (event.get('operation') or {}).get('tool', ''),
+                'active_window': ctx.get('window_title', ''),
+                'source': source_hint,
+                'event_id': event_id,
+                'severity': event.get('severity'),
+                'extension': '.png',
+                'behavioral_risk_boost': behavioral_risk_boost,
+                'behavioral_details': behavioral_details,
+                'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
+                'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
+                'text_content': ocr_text[:100] if ocr_text else '',
+                '_event_data': event,
+            }
+
+            risk_result = self.risk_scoring.calculate_score(
+                fast_scan_result, deep_analysis_result, event_context
+            )
+
+            if behavioral_risk_boost > 0:
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
+                if 'cvss_score' in risk_result:
+                    risk_result['cvss_score'] = round(min(10.0, risk_result['total_score']), 2)
+                risk_result['details']['behavioral'] = behavioral_details
+
+            # Screenshot YARA minimum score enforcement
+            # Yêu cầu TỐI THIỂU 2 rule match để tránh spam alert (1 rule đơn lẻ bỏ qua)
+            if len(yara_matches) >= 2:
+                _highly_sensitive_rules = {
+                    'credit', 'card', 'vietnam_id', 'cccd', 'cmnd', 'id_single',
+                    'api_key', 'bank_account', 'screenshot_confidential'
+                }
+                _is_highly_sensitive = any(
+                    any(kw in m.get('rule', '').lower() for kw in _highly_sensitive_rules)
+                    for m in yara_matches
+                )
+                _min_score = (
+                    WorkerConfig.SCREENSHOT_YARA_HIGHLY_SENSITIVE_MIN_SCORE
+                    if _is_highly_sensitive
+                    else WorkerConfig.SCREENSHOT_YARA_MIN_SCORE
+                )
+                if risk_result['total_score'] < _min_score:
+                    logger.info(
+                        f"[PID={pid}] Screenshot score boosted: "
+                        f"{risk_result['total_score']:.1f} → {_min_score} "
+                        f"({'highly_sensitive' if _is_highly_sensitive else 'standard'} YARA match, "
+                        f"{len(yara_matches)} rules)"
+                    )
+                    risk_result['total_score'] = _min_score
+                    risk_result['action'] = 'alert'
+                    if 'cvss_score' in risk_result:
+                        risk_result['cvss_score'] = round(_min_score, 2)
+
+            # 5. Report & Action
+            dummy_path = Path(f"screenshot://{file_path.name}")
+            report = self.report_generator.generate_report(
+                event, fast_scan_result, deep_analysis_result, risk_result, dummy_path
+            )
+
+            action = risk_result['action']
+            self.action_executor.execute(
+                action, file_path, risk_result['total_score'],
+                risk_result['details'], event_context, report
+            )
+
+            self.processed_count += 1
+
+            logger.info(
+                f"[PID={pid}] Processed Screenshot: {file_path.name} | "
+                f"OCR chars={len(ocr_text)} | "
+                f"Score={risk_result['total_score']:.1f} | "
+                f"Action={action.upper()} | "
+                f"YARA={len(yara_matches)}"
+            )
+
+            # 6. Dọn file ảnh sau khi scan
+            if getattr(WorkerConfig, 'SCREENSHOT_CLEANUP_AFTER_SCAN', True):
+                try:
+                    file_path.unlink()
+                    logger.debug(f"[PID={pid}] Deleted screenshot file: {file_path}")
+                except FileNotFoundError:
+                    pass  # Already deleted
+                except Exception as _del_err:
+                    logger.warning(f"[PID={pid}] Failed to delete screenshot: {_del_err}")
+
+            self.event_history.append(event.copy())
+            if len(self.event_history) > self.max_history_size:
+                self.event_history.pop(0)
+
+            return True
+
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Error processing screenshot event: {e}", exc_info=True)
+            return False
+
     def _process_special_event(self, event: dict) -> bool:
         """
         Xử lý các event đặc biệt không có file (proc_start, usb_connected, print_job, corr_*)

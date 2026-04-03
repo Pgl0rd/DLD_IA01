@@ -22,13 +22,44 @@ class OCRProcessor:
         self.cv2 = None
     
     def _lazy_load_tesseract(self):
-        """Lazy load Tesseract chỉ khi cần"""
+        """Lazy load Tesseract chỉ khi cần — tự động tìm path nếu không có trong PATH"""
         if not self.tesseract_loaded:
             try:
                 import pytesseract
                 from PIL import Image
                 import cv2
-                
+                import os
+
+                # 1. Ưu tiên env var TESSERACT_CMD
+                tess_cmd = os.getenv("TESSERACT_CMD", "").strip()
+
+                # 2. Nếu không có env var, thử tìm ở các đường dẫn cài mặc định
+                if not tess_cmd:
+                    _common_paths = [
+                        r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+                        r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+                        r"C:\Users\Public\Tesseract-OCR\tesseract.exe",
+                        r"C:\tesseract\tesseract.exe",
+                        "/usr/bin/tesseract",
+                        "/usr/local/bin/tesseract",
+                    ]
+                    import shutil
+                    tess_cmd = shutil.which("tesseract") or ""
+                    if not tess_cmd:
+                        for p in _common_paths:
+                            if os.path.isfile(p):
+                                tess_cmd = p
+                                break
+
+                if tess_cmd:
+                    pytesseract.pytesseract.tesseract_cmd = tess_cmd
+                    logger.info(f"Tesseract path configured: {tess_cmd}")
+                else:
+                    logger.warning(
+                        "Tesseract executable not found. Set env var TESSERACT_CMD=<path> "
+                        "or install via: choco install tesseract"
+                    )
+
                 self.pytesseract = pytesseract
                 self.Image = Image
                 self.cv2 = cv2

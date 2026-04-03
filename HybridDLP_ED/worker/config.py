@@ -47,6 +47,8 @@ class WorkerConfig:
     WORKER_DIR = WORKER_DIR
     AGENT_DIR = AGENT_DIR
     RUNTIME_DIR = AGENT_DIR / "runtime"
+    # Screenshots dir — resolved dynamically; single source of truth for agent & worker
+    SCREENSHOT_DIR = RUNTIME_DIR / "screenshots"
     # SQLite thống nhất: queue + (mặc định) hash cache — kiến trúc 2 process (Noteupdate)
     AGENT_STORE_DB = RUNTIME_DIR / "agent_store.db"
     # YARA rules are mounted at /app/yara_rules in Docker
@@ -76,34 +78,18 @@ class WorkerConfig:
     ALERT_DEDUP_SEC = float(os.getenv("ALERT_DEDUP_SEC", "600"))
     CACHE_CLEANUP_DAYS = 30  # Xóa cache cũ sau 30 ngày
     
-    # Fast Scan
-    YARA_RULES = [
-        # PII Detection
-        YARA_RULES_DIR / "vietnam_id.yar",
-        YARA_RULES_DIR / "vietnam_id_single.yar",  # Single ID without keywords
-        YARA_RULES_DIR / "credit_card.yar",
-        YARA_RULES_DIR / "credit_card_single.yar",  # Single credit card
-        YARA_RULES_DIR / "email.yar",
-        YARA_RULES_DIR / "email_single.yar",  # Single email in context
-        YARA_RULES_DIR / "phone_number.yar",
-        YARA_RULES_DIR / "phone_number_single.yar",  # Single phone in context
-        YARA_RULES_DIR / "bank_account.yar",
-        # Sensitive Data
-        YARA_RULES_DIR / "api_key.yar",  # Enhanced with more API key types
-        YARA_RULES_DIR / "financial_data.yar",
-        YARA_RULES_DIR / "source_code.yar",
-        YARA_RULES_DIR / "contract_legal.yar",
-        YARA_RULES_DIR / "hr_data.yar",
-        # Export Detection
-        YARA_RULES_DIR / "csv_excel_sensitive.yar",
-        # Archive Detection
-        YARA_RULES_DIR / "password_protected_archive.yar",
-    ]
+    # Fast Scan — AUTO-DISCOVERY: tự động load TẤT CẢ file .yar trong YARA_RULES_DIR.
+    # Thêm rule mới vào thư mục yara_rules/ là hệ thống tự nhận, không cần sửa code.
+    YARA_RULES: list = []  # sẽ được điền động bởi load_yara_rules()
     
     # Overload Protection
     PANIC_MODE_THRESHOLD = 1000  # Queue size trigger
     PANIC_MODE_DISABLE_THRESHOLD = 500  # Disable khi queue < 500
     
+    # Screenshot Processing
+    # Xóa file ảnh sau khi worker quét xong để tiết kiệm disk
+    SCREENSHOT_CLEANUP_AFTER_SCAN = os.getenv("SCREENSHOT_CLEANUP_AFTER_SCAN", "1").strip().lower() in {"1", "true", "yes", "on"}
+
     # OCR Configuration
     OCR_ENABLED = True
     OCR_MAX_FILE_SIZE_MB = 5
@@ -209,6 +195,14 @@ class WorkerConfig:
     CLIPBOARD_HIGHLY_SENSITIVE_MIN_ALERT_SCORE = _env_float_bounded(
         "CLIPBOARD_HIGHLY_SENSITIVE_MIN_ALERT_SCORE", 8.4, 0.0, 10.0
     )
+    # Screenshot: khi có YARA match, ép score tối thiểu vượt ngưỡng Windows popup (7.0)
+    # 1-2 rules match → 7.5; match rule nhạy cảm cao (credit card, ID, mật) → 8.5
+    SCREENSHOT_YARA_MIN_SCORE = _env_float_bounded(
+        "SCREENSHOT_YARA_MIN_SCORE", 7.5, 0.0, 10.0
+    )
+    SCREENSHOT_YARA_HIGHLY_SENSITIVE_MIN_SCORE = _env_float_bounded(
+        "SCREENSHOT_YARA_HIGHLY_SENSITIVE_MIN_SCORE", 8.5, 0.0, 10.0
+    )
     # Giảm trọng số "web nhạy cảm" để tránh over-score khi chỉ dựa vào title/domain.
     SENSITIVE_WEB_BEHAVIOR_WEIGHT = _env_float_bounded(
         "SENSITIVE_WEB_BEHAVIOR_WEIGHT", 0.6, 0.3, 1.0
@@ -285,10 +279,15 @@ class WorkerConfig:
     
     @classmethod
     def load_yara_rules(cls) -> Dict[str, str]:
-        """Load YARA rules"""
+        """
+        Auto-discover và load TẤT CẢ file .yar trong YARA_RULES_DIR.
+        Không cần hardcode tên rule — thêm file .yar vào thư mục là hệ thống tự nhận.
+        """
         rules = {}
-        for rule_file in cls.YARA_RULES:
-            if rule_file.exists():
+        if not cls.YARA_RULES_DIR.exists():
+            return rules
+        for rule_file in sorted(cls.YARA_RULES_DIR.glob("*.yar")):
+            if rule_file.is_file():
                 rules[rule_file.stem] = str(rule_file)
         return rules
     
@@ -300,3 +299,4 @@ class WorkerConfig:
         cls.ML_MODELS_DIR.mkdir(parents=True, exist_ok=True)
         cls.CACHE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
         cls.RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        cls.SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
