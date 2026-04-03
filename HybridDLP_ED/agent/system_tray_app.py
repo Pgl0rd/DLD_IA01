@@ -139,20 +139,12 @@ class SystemTrayApp:
                 "Worker",
                 Menu(
                     MenuItem(
-                        "Start",
-                        self._on_start_worker
-                    ),
-                    MenuItem(
-                        "Stop",
-                        self._on_stop_worker
-                    ),
-                    MenuItem(
                         f"Status: {worker_status}",
                         self._on_worker_status,
                         enabled=False
                     ),
                 )
-            ) ,
+            ),
             MenuItem(
                 "---",
                 lambda: None,
@@ -177,15 +169,28 @@ class SystemTrayApp:
             self.icon = Icon("HybridDLP", image, menu=self._create_menu())
             self.running = True
             
-            # Chạy icon ở non-daemon thread (không phải daemon thread)
-            # pystray cần chạy ở thread chính để tránh Tkinter errors
+            # Thread để update menu status
+            def update_menu():
+                while self.running:
+                    try:
+                        import time
+                        time.sleep(1)  # Update menu setiap 1 detik
+                        if self.icon:
+                            self.icon.menu = self._create_menu()
+                    except Exception as e:
+                        pass
+            
+            menu_thread = threading.Thread(target=update_menu, daemon=True)
+            menu_thread.start()
+            
+            # Chạy icon ở background thread
             def run_icon():
                 try:
                     self.icon.run()
                 except Exception as e:
                     print(f"❌ Tray icon error: {e}")
             
-            self.tray_thread = threading.Thread(target=run_icon, daemon=False)
+            self.tray_thread = threading.Thread(target=run_icon, daemon=True)
             self.tray_thread.start()
             
             return True

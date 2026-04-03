@@ -46,17 +46,6 @@ def main():
     else:
         print("[Boot] Configuration already set")
     
-    # Try auto-start worker (for popup/control center startup convenience)
-    try:
-        manager = get_service_manager()
-        success, msg = manager.start_worker()
-        if success:
-            print(f"[Boot] Auto-start worker succeeded: {msg}")
-        else:
-            print(f"[Boot] Auto-start worker failed: {msg}")
-    except Exception as e:
-        print(f"[Boot] Auto-start worker exception: {e}")
-
     # Run system tray
     print("\n[Boot] Starting System Tray Application...")
     

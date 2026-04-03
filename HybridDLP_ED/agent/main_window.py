@@ -209,7 +209,7 @@ class MainWindow:
         
         dialog = tk.Toplevel(self.root)
         dialog.title("Edit Server Settings")
-        dialog.geometry("450x320")
+        dialog.geometry("450x350")
         dialog.resizable(False, False)
         
         frame = ttk.Frame(dialog, padding=15)
@@ -221,9 +221,23 @@ class MainWindow:
         url_entry.pack(fill=tk.X, pady=(0, 15))
         
         ttk.Label(frame, text="API Key:", font=("Segoe UI", 10)).pack(anchor=tk.W)
+        
         key_var = tk.StringVar(value=config.get_api_key())
-        key_entry = ttk.Entry(frame, textvariable=key_var, width=35, show="*")
-        key_entry.pack(fill=tk.X, pady=(0, 20))
+        show_key_var = tk.BooleanVar(value=False)
+        
+        key_frame = ttk.Frame(frame)
+        key_frame.pack(fill=tk.X, pady=(0, 20))
+        
+        key_entry = ttk.Entry(key_frame, textvariable=key_var, width=35, show="*")
+        key_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        def toggle_api_key():
+            show_key_var.set(not show_key_var.get())
+            key_entry.config(show="" if show_key_var.get() else "*")
+            show_btn.config(text="👁️ Hide" if show_key_var.get() else "👁️ Show")
+        
+        show_btn = ttk.Button(key_frame, text="👁️ Show", command=toggle_api_key, width=8)
+        show_btn.pack(side=tk.RIGHT)
         
         # Test button frame
         test_btn_frame = ttk.Frame(frame)
