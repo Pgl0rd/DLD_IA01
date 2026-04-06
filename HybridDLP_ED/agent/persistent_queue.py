@@ -38,6 +38,9 @@ class PersistentEventQueue:
     """
     Queue bền vững: crash không mất event (đã commit).
     Một worker đơn lẻ: lease một dòng pending → processing → ack (xóa).
+
+    Producer tối ưu: gom nhiều INSERT trong một transaction (ít commit hơn → ít khóa WAL
+    với worker đang lease/ack). Tắt bằng DLP_QUEUE_ENQUEUE_BATCH_SIZE=1.
     """
 
     def __init__(self, db_path: Optional[Any] = None):
@@ -45,6 +48,16 @@ class PersistentEventQueue:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
         self._conn: Optional[sqlite3.Connection] = None
+        self._buf: list[tuple[str, float]] = []
+        self._buf_deadline: float = 0.0
+        try:
+            self._batch_size = max(1, int(os.getenv("DLP_QUEUE_ENQUEUE_BATCH_SIZE", "25")))
+        except ValueError:
+            self._batch_size = 25
+        try:
+            self._flush_interval = float(os.getenv("DLP_QUEUE_ENQUEUE_FLUSH_SEC", "0.05"))
+        except ValueError:
+            self._flush_interval = 0.05
         self._init_schema()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -91,6 +104,10 @@ class PersistentEventQueue:
 
     def close(self) -> None:
         with self._lock:
+            try:
+                self._flush_unlocked()
+            except Exception:
+                pass
             if self._conn is not None:
                 try:
                     self._conn.close()
@@ -98,18 +115,59 @@ class PersistentEventQueue:
                     pass
                 self._conn = None
 
+    def _flush_unlocked(self) -> int:
+        """Ghi buffer ra DB. Phải giữ self._lock. Trả về lastrowid cuối hoặc -1."""
+        if not self._buf:
+            return -1
+        conn = self._get_conn()
+        last_id = -1
+        for payload, ts in self._buf:
+            cur = conn.execute(
+                "INSERT INTO event_queue (payload_json, status, created_ts, attempts) VALUES (?, 'pending', ?, 0)",
+                (payload, ts),
+            )
+            if cur.lastrowid is not None:
+                last_id = int(cur.lastrowid)
+        self._buf.clear()
+        conn.commit()
+        return last_id
+
+    def flush(self) -> None:
+        """Đẩy hết event trong buffer (shutdown / kiểm thử)."""
+        with self._lock:
+            self._flush_unlocked()
+
+    def maybe_flush(self) -> None:
+        """Ghi buffer nếu đủ batch hoặc đã quá hạn (gọi từ consumer khi idle)."""
+        now = time.time()
+        with self._lock:
+            if not self._buf:
+                return
+            if len(self._buf) >= self._batch_size:
+                self._flush_unlocked()
+                return
+            if self._flush_interval <= 0:
+                self._flush_unlocked()
+                return
+            if now >= self._buf_deadline:
+                self._flush_unlocked()
+
     def enqueue(self, event: Dict[str, Any]) -> int:
-        """Thêm event (JSON). Trả về id hàng."""
+        """Thêm event (JSON). Trả về id hàng (hoặc -1 nếu còn nằm trong buffer tạm)."""
         payload = json.dumps(event, ensure_ascii=False)
         now = time.time()
         with self._lock:
-            conn = self._get_conn()
-            cur = conn.execute(
-                "INSERT INTO event_queue (payload_json, status, created_ts, attempts) VALUES (?, 'pending', ?, 0)",
-                (payload, now),
+            if not self._buf:
+                self._buf_deadline = now + (self._flush_interval if self._flush_interval > 0 else 0.0)
+            self._buf.append((payload, now))
+            flush_now = (
+                len(self._buf) >= self._batch_size
+                or self._flush_interval <= 0
+                or now >= self._buf_deadline
             )
-            conn.commit()
-            return int(cur.lastrowid)
+            if flush_now:
+                return self._flush_unlocked()
+            return -1
 
     def pending_count(self) -> int:
         with self._lock:
@@ -167,31 +225,49 @@ class PersistentEventQueue:
     def lease_next(self) -> Optional[Tuple[int, Dict[str, Any]]]:
         """
         Lấy một event pending, chuyển sang processing. Trả về (id, event_dict) hoặc None.
+
+        Khi hàng rỗng: chỉ SELECT (shared lock), không BEGIN IMMEDIATE — tránh chặn
+        agent đang batch INSERT (producer).
         """
         with self._lock:
             conn = self._get_conn()
+            row = conn.execute(
+                "SELECT id, payload_json FROM event_queue WHERE status='pending' ORDER BY id LIMIT 1"
+            ).fetchone()
+            if not row:
+                return None
+            qid = int(row[0])
+            raw = row[1]
+            try:
+                payload = json.loads(raw)
+            except Exception:
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    conn.execute("DELETE FROM event_queue WHERE id=?", (qid,))
+                    conn.execute("COMMIT")
+                except Exception:
+                    try:
+                        conn.execute("ROLLBACK")
+                    except Exception:
+                        pass
+                return None
             conn.execute("BEGIN IMMEDIATE")
             try:
-                row = conn.execute(
-                    "SELECT id, payload_json FROM event_queue WHERE status='pending' ORDER BY id LIMIT 1"
-                ).fetchone()
-                if not row:
-                    conn.execute("COMMIT")
-                    return None
-                qid = int(row[0])
-                payload = json.loads(row[1])
-                conn.execute(
-                    "UPDATE event_queue SET status='processing' WHERE id=?",
+                cur = conn.execute(
+                    "UPDATE event_queue SET status='processing' WHERE id=? AND status='pending'",
                     (qid,),
                 )
+                if cur.rowcount != 1:
+                    conn.execute("ROLLBACK")
+                    return None
                 conn.execute("COMMIT")
-                return qid, payload
             except Exception:
                 try:
                     conn.execute("ROLLBACK")
                 except Exception:
                     pass
                 raise
+            return qid, payload
 
     def ack(self, queue_id: int) -> None:
         with self._lock:

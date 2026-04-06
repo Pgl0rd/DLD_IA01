@@ -247,29 +247,26 @@ class QueueConsumer:
                 
                 row = cursor.fetchone()
                 conn.close()
-                
-                # Success - break retry loop
-                break
-            
+
                 if row:
                     try:
                         event_id = row['id']
                         event_type = row['type']
-                        
+
                         # Parse payload_json
                         payload = json.loads(row['payload_json']) if row['payload_json'] else {}
-                        
+
                         # Build event từ row
                         # Đảm bảo 'type' luôn có giá trị (từ row hoặc payload)
                         event_type = payload.get('type') or event_type
-                        
+
                         # Double check: Skip heartbeat even if it passed SQL filter
                         if event_type and event_type.lower() == 'heartbeat':
                             # Mark as processed but skip
                             self.last_processed_id = event_id
                             logger.debug(f"[PID={self.pid}] Skipping heartbeat event_id={event_id}")
                             return None
-                        
+
                         event = {
                             'event_id': event_id,
                             'timestamp': row['ts'],
@@ -280,34 +277,34 @@ class QueueConsumer:
                             'source': row['source'],
                             **payload  # Merge payload vào event (may override above fields)
                         }
-                        
+
                         # Ensure 'type' is always set (payload may not have it)
                         if 'type' not in event or not event.get('type'):
                             event['type'] = event_type
-                        
+
                         # Final check: Skip heartbeat
                         if event.get('type', '').lower() == 'heartbeat':
                             self.last_processed_id = event_id
                             logger.debug(f"[PID={self.pid}] Skipping heartbeat event_id={event_id} (from payload)")
                             return None
-                        
+
                         self.last_processed_id = event_id
-                        
+
                         # Log event details
                         logger.info(
                             f"[PID={self.pid}] Received event: "
                             f"event_id={event_id}, type={event_type}, "
                             f"source={row['source']}"
                         )
-                        
+
                         return event
                     except json.JSONDecodeError as e:
                         logger.error(f"[PID={self.pid}] Invalid JSON in payload for event_id={row['id']}: {e}")
                         return None
-                else:
-                    # Không có event mới, sleep
-                    time.sleep(timeout)
-                    return None
+
+                # Không có event mới, sleep
+                time.sleep(timeout)
+                return None
             except sqlite3.OperationalError as e:
                 error_msg = str(e)
                 

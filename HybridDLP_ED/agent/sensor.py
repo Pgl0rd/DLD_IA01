@@ -378,6 +378,11 @@ def consumer_loop(
         try:
             event = qm.event_queue.get(timeout=0.5)
         except Empty:
+            if persistent_queue is not None:
+                try:
+                    persistent_queue.maybe_flush()
+                except Exception:
+                    pass
             continue
         except Exception:
             continue
@@ -948,6 +953,16 @@ def main() -> None:
         try:
             if hasattr(s, "close"):
                 s.close()
+        except Exception:
+            pass
+
+    if persistent_queue is not None:
+        try:
+            persistent_queue.flush()
+        except Exception:
+            pass
+        try:
+            persistent_queue.close()
         except Exception:
             pass
 

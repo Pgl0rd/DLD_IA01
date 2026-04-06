@@ -6,6 +6,7 @@ import sys
 import signal
 import time
 import os
+from typing import Optional
 from pathlib import Path
 from loguru import logger
 import sys
@@ -1350,8 +1351,8 @@ class DetectionEngine:
                         except Exception as e:
                             logger.warning(f"ack queue id={qid} failed: {e}")
                 else:
-                    # No event, sleep briefly
-                    time.sleep(0.1)
+                    # get_event đã chờ timeout; sleep ngắn tránh busy-spin nếu backend khác
+                    time.sleep(0.02)
                 
                 # Print stats every 60 seconds
                 if time.time() - last_stats_time > 60:
@@ -1422,10 +1423,9 @@ def main():
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
     
-    # Create and run engine
-    engine = DetectionEngine()
-    
+    engine: Optional["DetectionEngine"] = None
     try:
+        engine = DetectionEngine()
         engine.run()
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
@@ -1433,6 +1433,13 @@ def main():
         logger.error(f"Fatal error: {e}", exc_info=True)
         raise
     finally:
+        if engine is not None:
+            qc = getattr(engine, "queue_consumer", None)
+            if qc is not None and hasattr(qc, "flush_state"):
+                try:
+                    qc.flush_state()
+                except Exception:
+                    pass
         logger.info("Detection Engine stopped")
 
 
