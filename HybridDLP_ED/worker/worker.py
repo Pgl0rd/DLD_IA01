@@ -431,9 +431,14 @@ class DetectionEngine:
                     
                     if ml_anomaly_result.get('is_anomaly', False):
                         anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
+                        reasons = (
+                            (ml_anomaly_result.get("profile_reasons") or [])
+                            + (ml_anomaly_result.get("baseline_reasons") or [])
+                        )
                         logger.warning(
                             f"UEBA Anomaly Detected: score={anomaly_score:.2f} "
-                            f"(raw={ml_anomaly_result.get('raw_score', 0):.3f})"
+                            f"(raw={ml_anomaly_result.get('raw_score', 0):.3f}) "
+                            f"reasons={reasons}"
                         )
                 except Exception as e:
                     logger.error(f"Error in ML anomaly detection: {e}")
@@ -794,9 +799,13 @@ class DetectionEngine:
                     ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
                     if ml_anomaly_result.get('is_anomaly', False):
                         anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
+                        reasons = (
+                            (ml_anomaly_result.get("profile_reasons") or [])
+                            + (ml_anomaly_result.get("baseline_reasons") or [])
+                        )
                         logger.warning(
                             f"UEBA Anomaly Detected (Clipboard): score={anomaly_score:.2f} "
-                            f"reasons={ml_anomaly_result.get('profile_reasons', [])}"
+                            f"reasons={reasons}"
                         )
                 except Exception as e:
                     logger.error(f"Error in ML anomaly detection (clipboard): {e}")

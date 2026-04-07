@@ -8,6 +8,8 @@ Hybrid scoring:
 """
 import logging
 import math
+import json
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,8 +52,56 @@ class BehavioralMLAnalyzer:
         self.feature_extractor = EventFeatureExtractor()
         self.is_loaded = False
         self._accumulator: Dict[str, Dict[str, float]] = {}
+        # Baseline per-user (persist across worker restarts).
+        # Stored as lightweight JSON (atomic replace) under worker/logs/ for easy inspection.
+        try:
+            base = Path(__file__).parent.parent / "worker" / "logs" / "ueba"
+            base.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            base = Path(__file__).parent
+        self._profile_path = Path(os.getenv("UEBA_PROFILE_PATH", str(base / "ueba_user_baselines.json")))
+        self._profiles: Dict[str, Dict[str, Any]] = {}
+        self._profile_dirty = 0
+        self._profile_last_save_ts = 0.0
+        self._profile_save_every = max(1, int(os.getenv("UEBA_PROFILE_SAVE_EVERY", "25")))
+        self._profile_save_min_sec = max(0.2, float(os.getenv("UEBA_PROFILE_SAVE_MIN_SEC", "2.0")))
+        self._profile_decay_hours = max(1.0, float(os.getenv("UEBA_PROFILE_DECAY_HOURS", "168")))  # 7d default
+        self._profile_min_events = max(10, int(os.getenv("UEBA_PROFILE_MIN_EVENTS", "35")))
+        self._load_profiles()
         if not self.model_path.exists():
             logger.warning(f"UEBA model not found at {self.model_path}. Anomaly detection disabled.")
+
+    def _load_profiles(self) -> None:
+        try:
+            if not self._profile_path.exists():
+                return
+            raw = self._profile_path.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict) and isinstance(data.get("profiles"), dict):
+                self._profiles = data["profiles"]
+        except Exception as e:
+            logger.warning(f"UEBA baseline load failed: {e}")
+
+    def _save_profiles(self, force: bool = False) -> None:
+        try:
+            now = datetime.now().timestamp()
+            if not force:
+                if self._profile_dirty <= 0:
+                    return
+                if self._profile_dirty < self._profile_save_every and (now - self._profile_last_save_ts) < self._profile_save_min_sec:
+                    return
+            payload = {
+                "version": 1,
+                "saved_ts": now,
+                "profiles": self._profiles,
+            }
+            tmp = self._profile_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(self._profile_path)
+            self._profile_dirty = 0
+            self._profile_last_save_ts = now
+        except Exception as e:
+            logger.debug(f"UEBA baseline save failed: {e}")
 
     def load_model(self) -> bool:
         try:
@@ -143,6 +193,116 @@ class BehavioralMLAnalyzer:
             "app_risky": app_risky,
             "file_size_mb": file_size / (1024.0 * 1024.0),
         }
+
+    def _get_user_profile(self, user: str) -> Dict[str, Any]:
+        p = self._profiles.get(user)
+        if not isinstance(p, dict):
+            p = {
+                "n": 0,
+                "last_ts": 0.0,
+                # Exponential moving averages (EMA) of key habits.
+                "ema_off_hours": 0.0,
+                "ema_external": 0.0,
+                "ema_clipboard": 0.0,
+                "ema_risky_app": 0.0,
+                # Optional hour histogram (0-23) for explainability.
+                "hour_hist": [0] * 24,
+            }
+            self._profiles[user] = p
+        return p
+
+    def _ema_alpha(self, elapsed_hours: float) -> float:
+        # Convert elapsed time to EMA alpha using a decay horizon.
+        # alpha ~ 1-exp(-dt/T). Clamp for stability.
+        T = float(self._profile_decay_hours)
+        if T <= 0:
+            return 0.2
+        a = 1.0 - math.exp(-max(0.0, elapsed_hours) / T)
+        return max(0.005, min(0.35, a))
+
+    def _update_user_profile(self, user: str, ts: datetime, signal: Dict[str, float]) -> Dict[str, Any]:
+        p = self._get_user_profile(user)
+        last_ts = float(p.get("last_ts") or 0.0)
+        now_ts = float(ts.timestamp())
+        elapsed_h = 0.0 if last_ts <= 0 else max(0.0, (now_ts - last_ts) / 3600.0)
+        alpha = self._ema_alpha(elapsed_h)
+
+        is_off = 1.0 if (ts.hour < 8 or ts.hour >= 18) else 0.0
+        p["ema_off_hours"] = (1 - alpha) * float(p.get("ema_off_hours", 0.0)) + alpha * is_off
+        p["ema_external"] = (1 - alpha) * float(p.get("ema_external", 0.0)) + alpha * float(signal.get("is_external", 0.0))
+        p["ema_clipboard"] = (1 - alpha) * float(p.get("ema_clipboard", 0.0)) + alpha * float(signal.get("is_clipboard", 0.0))
+        p["ema_risky_app"] = (1 - alpha) * float(p.get("ema_risky_app", 0.0)) + alpha * float(signal.get("app_risky", 0.0))
+
+        try:
+            hh = p.get("hour_hist")
+            if isinstance(hh, list) and len(hh) == 24:
+                hh[ts.hour] = int(hh[ts.hour] or 0) + 1
+        except Exception:
+            pass
+
+        p["n"] = int(p.get("n") or 0) + 1
+        p["last_ts"] = now_ts
+        self._profile_dirty += 1
+        self._save_profiles(force=False)
+        return p
+
+    def _baseline_drift_score(self, ts: datetime, signal: Dict[str, float], profile: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Score how far the current event deviates from the user's long-term baseline.
+        Output is [0..10] and a list of reasons for defendability.
+        """
+        n = int(profile.get("n") or 0)
+        if n < self._profile_min_events:
+            return {"score": 0.0, "reasons": ["baseline_warmup"], "n": n}
+
+        off_b = float(profile.get("ema_off_hours") or 0.0)
+        ext_b = float(profile.get("ema_external") or 0.0)
+        clip_b = float(profile.get("ema_clipboard") or 0.0)
+        risky_b = float(profile.get("ema_risky_app") or 0.0)
+
+        is_off = 1.0 if (ts.hour < 8 or ts.hour >= 18) else 0.0
+        is_ext = float(signal.get("is_external") or 0.0)
+        is_clip = float(signal.get("is_clipboard") or 0.0)
+        is_risky = float(signal.get("app_risky") or 0.0)
+
+        score = 0.0
+        reasons: List[str] = []
+
+        # Off-hours: only strong when user rarely works off-hours.
+        if is_off > 0 and off_b < 0.10:
+            score += 2.4
+            reasons.append(f"off_hours_vs_baseline(p={off_b:.2f})")
+        elif is_off > 0 and off_b < 0.25:
+            score += 1.2
+            reasons.append(f"off_hours_elevated(p={off_b:.2f})")
+
+        # External channel (USB/cloud/messaging domain signals): strong when baseline is low.
+        if is_ext > 0 and ext_b < 0.05:
+            score += 3.2
+            reasons.append(f"external_channel_first_time(p={ext_b:.2f})")
+        elif is_ext > 0 and ext_b < 0.15:
+            score += 1.6
+            reasons.append(f"external_channel_rare(p={ext_b:.2f})")
+
+        # Clipboard paste: spike is handled by short-term profile; here we detect baseline drift.
+        if is_clip > 0 and clip_b < 0.05:
+            score += 1.2
+            reasons.append(f"clipboard_unusual(p={clip_b:.2f})")
+
+        # Risky app usage: when baseline risky-app is low.
+        if is_risky > 0 and risky_b < 0.10:
+            score += 1.3
+            reasons.append(f"risky_app_unusual(p={risky_b:.2f})")
+
+        # Sequence synergy: off-hours + external + risky app is strong.
+        if is_off > 0 and is_ext > 0 and is_risky > 0:
+            score += 1.4
+            reasons.append("sequence_offhours_external_riskyapp")
+        elif is_off > 0 and is_ext > 0:
+            score += 0.8
+            reasons.append("sequence_offhours_external")
+
+        return {"score": _clamp_0_10(score), "reasons": reasons, "n": n}
 
     def _profile_deviation(self, event: Dict[str, Any], history: List[Dict[str, Any]]) -> Dict[str, Any]:
         now = self._parse_ts(event)
@@ -273,11 +433,14 @@ class BehavioralMLAnalyzer:
             user = self._extract_user(event)
             ts = self._parse_ts(event)
             signal = self._event_signals(event)
+            user_profile = self._update_user_profile(user, ts, signal)
+            baseline = self._baseline_drift_score(ts, signal, user_profile)
             accum = self._update_accumulator(user, ts, float(profile["score"]), signal)
 
             anomaly_score = _clamp_0_10(
                 model_score * 0.65
-                + float(profile["score"]) * 0.35
+                + float(profile["score"]) * 0.25
+                + float(baseline["score"]) * 0.10
                 + accum * max(0.0, min(1.0, boost_factor))
             )
             is_anomaly = anomaly_score >= threshold
@@ -289,8 +452,11 @@ class BehavioralMLAnalyzer:
                 "raw_score": raw_score,
                 "model_score": round(model_score, 3),
                 "profile_score": round(float(profile["score"]), 3),
+                "baseline_score": round(float(baseline["score"]), 3),
                 "slow_burn_score": round(accum, 3),
                 "profile_reasons": profile["reasons"],
+                "baseline_reasons": baseline["reasons"],
+                "baseline_n": int(baseline.get("n") or 0),
             }
         except Exception as e:
             logger.error(f"Error predicting anomaly: {e}")
