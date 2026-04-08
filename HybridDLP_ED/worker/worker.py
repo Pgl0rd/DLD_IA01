@@ -8,6 +8,7 @@ import time
 import os
 from typing import Optional
 from pathlib import Path
+from datetime import datetime, timezone
 from loguru import logger
 import sys
 from pathlib import Path
@@ -206,6 +207,131 @@ class DetectionEngine:
             (extra_result or {}).get("is_suspicious")
         )
         return merged
+
+    def _parse_event_dt(self, event: dict) -> datetime | None:
+        """Parse event timestamp (ts/timestamp) to datetime (timezone-aware if possible)."""
+        t = event.get("ts") or event.get("timestamp")
+        if t is None:
+            return None
+        if isinstance(t, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(t), tz=timezone.utc)
+            except Exception:
+                return None
+        s = str(t).strip()
+        if not s:
+            return None
+        try:
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+            return datetime.fromisoformat(s)
+        except Exception:
+            # Common legacy format
+            try:
+                return datetime.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            except Exception:
+                return None
+
+    def _is_off_hours(self, dt: datetime | None) -> bool:
+        if dt is None:
+            return False
+        h = dt.hour
+        wd = dt.weekday()
+        if wd >= 5:
+            return True
+        return h < 8 or h >= 18
+
+    def _is_sensitive_external_destination(self, event: dict) -> bool:
+        """
+        Heuristic: USB/removable/network/cloud/http destinations, or known sensitive domains in context.
+        """
+        ctx = event.get("context", {}) or {}
+        dest = str(event.get("destination") or ctx.get("destination") or "").lower()
+        domain = str(ctx.get("domain") or "").lower()
+        if any(k in dest for k in ("usb", "removable", "e:\\", "f:\\")):
+            return True
+        if "\\\\" in dest or "network" in dest:
+            return True
+        if any(k in dest for k in ("http", "https", "drive.google", "dropbox", "onedrive", "wetransfer", "mega")):
+            return True
+        if domain in {
+            "drive.google.com",
+            "dropbox.com",
+            "onedrive.live.com",
+            "chat.openai.com",
+            "chatgpt.com",
+            "claude.ai",
+            "discord.com",
+            "chat.zalo.me",
+            "zalo.me",
+        }:
+            return True
+        return False
+
+    def _compute_bulk_exfil_features(self, event: dict, file_size_mb: float) -> dict:
+        """
+        Aggregate recent *external transfer* events (same user) in a sliding window.
+        Returns window counts/MB and whether it meets bulk thresholds.
+        """
+        window_sec = int(getattr(WorkerConfig, "BULK_EXFIL_WINDOW_SEC", 600))
+        min_files = int(getattr(WorkerConfig, "BULK_EXFIL_MIN_FILES", 25))
+        min_total_mb = float(getattr(WorkerConfig, "BULK_EXFIL_MIN_TOTAL_MB", 250.0))
+
+        ctx = event.get("context", {}) or {}
+        user = str(ctx.get("user") or event.get("user") or "unknown").lower()
+        dt = self._parse_event_dt(event)
+        if dt is None:
+            return {
+                "bulk_window_sec": window_sec,
+                "bulk_file_count_window": 0,
+                "bulk_total_mb_window": 0.0,
+                "bulk_meets_threshold": False,
+            }
+
+        cutoff = dt.timestamp() - float(window_sec)
+        files = 0
+        total_mb = 0.0
+
+        # Count current event (if it is an external transfer)
+        if self._is_external_transfer_event(event) and self._is_sensitive_external_destination(event):
+            files += 1
+            total_mb += float(file_size_mb or 0.0)
+
+        # Count recent history
+        for ev in reversed(self.event_history[-500:]):  # bounded scan
+            try:
+                ev_ctx = ev.get("context", {}) or {}
+                ev_user = str(ev_ctx.get("user") or ev.get("user") or "unknown").lower()
+                if ev_user != user:
+                    continue
+                ev_dt = self._parse_event_dt(ev)
+                if ev_dt is None:
+                    continue
+                if ev_dt.timestamp() < cutoff:
+                    break
+                if not self._is_external_transfer_event(ev):
+                    continue
+                if not self._is_sensitive_external_destination(ev):
+                    continue
+                # size bytes
+                size_b = (
+                    ev.get("size")
+                    or (ev.get("object", {}) or {}).get("size_bytes")
+                    or 0
+                )
+                mb = float(size_b) / (1024.0 * 1024.0) if size_b else 0.0
+                files += 1
+                total_mb += mb
+            except Exception:
+                continue
+
+        meets = (files >= min_files) or (total_mb >= min_total_mb)
+        return {
+            "bulk_window_sec": window_sec,
+            "bulk_file_count_window": int(files),
+            "bulk_total_mb_window": round(float(total_mb), 2),
+            "bulk_meets_threshold": bool(meets),
+        }
     
     def process_event(self, event: dict) -> bool:
         """
@@ -369,10 +495,31 @@ class DetectionEngine:
             
             yara_matches = fast_scan_result.get('yara_matches', [])
 
+            # 3.5 Bulk exfiltration features (demo: off-hours + many files/large total to USB/sensitive)
+            bulk_feats = self._compute_bulk_exfil_features(event, file_size_mb=file_size_mb)
+            ev_dt = self._parse_event_dt(event)
+            is_off_hours = self._is_off_hours(ev_dt)
+            is_sensitive_external = self._is_sensitive_external_destination(event)
+            bulk_force_deep = bool(
+                getattr(WorkerConfig, "BULK_EXFIL_FORCE_DEEP_ANALYSIS", True)
+                and is_off_hours
+                and is_sensitive_external
+                and bulk_feats.get("bulk_meets_threshold", False)
+            )
+            if bulk_force_deep:
+                logger.warning(
+                    "Bulk exfiltration trigger: off_hours=%s sensitive_external=%s files=%s total_mb=%s window_sec=%s → force DeepAnalysis/ML scan",
+                    is_off_hours,
+                    is_sensitive_external,
+                    bulk_feats.get("bulk_file_count_window"),
+                    bulk_feats.get("bulk_total_mb_window"),
+                    bulk_feats.get("bulk_window_sec"),
+                )
+
             # 4. Decision Point
-            if fast_scan_result.get('is_suspicious', False):
+            if fast_scan_result.get('is_suspicious', False) or bulk_force_deep:
                 # Nếu YARA phát hiện ngay với high confidence → có thể skip deep analysis
-                if yara_matches and not panic_mode:
+                if yara_matches and not panic_mode and not bulk_force_deep:
                     # Check nếu là high-risk rule (ID, credit card)
                     high_risk_rules = ['id', 'cmnd', 'cccd', 'credit', 'card']
                     is_high_risk = any(
@@ -391,8 +538,16 @@ class DetectionEngine:
                             panic_mode
                         )
                 else:
-                    # Panic mode hoặc không có YARA match → skip deep analysis
-                    deep_analysis_result = {'is_sensitive': False}
+                    # Panic mode → skip deep analysis. Bulk-force only works when not panic.
+                    if (not panic_mode) and bulk_force_deep:
+                        deep_analysis_result = self.deep_analysis.analyze(
+                            file_path,
+                            fast_scan_result.get('file_type'),
+                            panic_mode
+                        )
+                        deep_analysis_result["bulk_triggered_deep_scan"] = True
+                    else:
+                        deep_analysis_result = {'is_sensitive': False}
             else:
                 # Safe từ fast scan → skip deep analysis
                 deep_analysis_result = {'is_sensitive': False}
@@ -495,6 +650,13 @@ class DetectionEngine:
                 'time': event.get('ts') or event.get('timestamp', ''),
                 'location': str(file_path.parent),
                 'file_size_mb': file_size_mb,
+                # Bulk exfiltration window features (used by CVSS-DLP EM volume & demo explainability)
+                'bulk_window_sec': bulk_feats.get("bulk_window_sec"),
+                'bulk_file_count_window': bulk_feats.get("bulk_file_count_window"),
+                'bulk_total_mb_window': bulk_feats.get("bulk_total_mb_window"),
+                'bulk_meets_threshold': bulk_feats.get("bulk_meets_threshold"),
+                'is_off_hours': is_off_hours,
+                'is_sensitive_external_destination': is_sensitive_external,
                 # Bổ sung context nâng cao
                 'process_name': ctx.get('process_name'),
                 'active_window': ctx.get('active_window'),

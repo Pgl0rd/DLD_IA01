@@ -101,7 +101,7 @@ def score_concealment(fast_scan_result: Dict[str, Any], ctx: Dict[str, Any]) -> 
 
 
 def score_volume(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
-    """Nhóm 3 — volume (hạn chế: chỉ size event)."""
+    """Nhóm 3 — volume (single + bulk window)."""
     reasons: List[str] = []
     s = 0.0
     mb = float(ctx.get("file_size_mb") or 0)
@@ -111,6 +111,39 @@ def score_volume(ctx: Dict[str, Any]) -> Tuple[float, List[str]]:
     elif mb > 50:
         s += 0.8
         reasons.append("volume_medium_file")
+
+    # Bulk transfer window (from worker aggregation)
+    try:
+        bulk_files = int(ctx.get("bulk_file_count_window") or 0)
+    except Exception:
+        bulk_files = 0
+    try:
+        bulk_mb = float(ctx.get("bulk_total_mb_window") or 0.0)
+    except Exception:
+        bulk_mb = 0.0
+    try:
+        cfg_min_files = int(getattr(WorkerConfig, "BULK_EXFIL_MIN_FILES", 10))
+    except Exception:
+        cfg_min_files = 10
+    try:
+        cfg_min_mb = float(getattr(WorkerConfig, "BULK_EXFIL_MIN_TOTAL_MB", 100.0))
+    except Exception:
+        cfg_min_mb = 100.0
+
+    # Primary thresholds align with demo trigger (default: 10 files / 100MB)
+    if bulk_files >= max(2 * cfg_min_files, cfg_min_files + 5):
+        s += 1.2
+        reasons.append("volume_bulk_many_files")
+    elif bulk_files >= cfg_min_files:
+        s += 0.6
+        reasons.append("volume_bulk_some_files")
+    if bulk_mb >= max(5.0 * cfg_min_mb, cfg_min_mb + 200.0):
+        s += 1.3
+        reasons.append("volume_bulk_very_large_total")
+    elif bulk_mb >= cfg_min_mb:
+        s += 0.8
+        reasons.append("volume_bulk_large_total")
+
     return min(2.5, s), reasons
 
 

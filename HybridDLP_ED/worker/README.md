@@ -125,6 +125,31 @@ Tài liệu công thức đầy đủ (NIST, trọng số, Isolation Forest, sơ
 python worker.py
 ```
 
+### Demo case: Ngoài giờ + copy nhiều file dung lượng lớn ra USB/sensitive
+
+Chạy script tạo file dummy + enqueue burst event "file_copy" (đích `F:\...` giả lập USB) để worker **bật deep/ML scan** và dashboard thấy **ALERT**:
+
+```bash
+python HybridDLP_ED/worker/tools/demo_bulk_exfil.py
+```
+
+Env tuỳ chọn:
+
+```env
+# Bulk window / thresholds
+BULK_EXFIL_WINDOW_SEC=600
+BULK_EXFIL_MIN_FILES=10
+BULK_EXFIL_MIN_TOTAL_MB=100
+BULK_EXFIL_FORCE_DEEP_ANALYSIS=1
+
+# Demo generator controls
+DEMO_SRC_DIR=C:\DemoDLP\source
+DEMO_DST_ROOT=F:\DLP_DEMO
+DEMO_FILE_COUNT=10
+DEMO_FILE_SIZE_MB=10
+DEMO_OFF_HOURS_ISO=2026-04-08T21:30:00+07:00
+```
+
 ### Chạy như Windows Service (tùy chọn)
 
 Worker có thể được spawn bởi Agent Service hoặc chạy độc lập.

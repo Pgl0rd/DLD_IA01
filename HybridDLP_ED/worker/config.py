@@ -247,6 +247,18 @@ class WorkerConfig:
     CVSS_DLP_USE_FORMULA1_EM_FACTOR = os.getenv('CVSS_DLP_USE_FORMULA1', '0').strip().lower() in {
         '1', 'true', 'yes', 'on',
     }
+
+    # --- Bulk exfiltration demo controls (off-hours + many files/large bytes) ---
+    # Window to aggregate recent external transfer events for "bulk copy" heuristic.
+    BULK_EXFIL_WINDOW_SEC = int(os.getenv("BULK_EXFIL_WINDOW_SEC", "600"))  # 10 minutes
+    # Trigger thresholds: either files >= N OR total >= M MB within window.
+    BULK_EXFIL_MIN_FILES = int(os.getenv("BULK_EXFIL_MIN_FILES", "10"))
+    BULK_EXFIL_MIN_TOTAL_MB = _env_float("BULK_EXFIL_MIN_TOTAL_MB", 100.0)
+    # If enabled, force DeepAnalysis/ML on external transfer events meeting bulk+off-hours criteria,
+    # even when fast scan doesn't look suspicious (demo requirement).
+    BULK_EXFIL_FORCE_DEEP_ANALYSIS = os.getenv("BULK_EXFIL_FORCE_DEEP_ANALYSIS", "1").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
     
     # Sensitive exfiltration folders (Windows paths in agent events)
     # Ví dụ: "C:\\PrivateFolder;D:\\HR_Secret"
