@@ -125,6 +125,12 @@ class DetectionEngine:
         self.running = False
         self.processed_count = 0
         self.error_count = 0
+
+        # Normalize filename policy lists (case-insensitive match).
+        # IMPORTANT: _extract_event_file_name() returns lowercased names, so these
+        # sets must be lowercased too.
+        self._low_medium_names_norm = {self._normalize_filename(x) for x in self.LOW_MEDIUM_FILE_NAMES}
+        self._high_risk_names_norm = {self._normalize_filename(x) for x in self.HIGH_RISK_FILE_NAMES}
         
         logger.info(
             f"Detection Engine initialized (queue={WorkerConfig.WORKER_QUEUE_BACKEND}, "
@@ -174,7 +180,7 @@ class DetectionEngine:
         fn_policy = details.setdefault("filename_policy", {})
         fn_policy["file_name"] = file_name
 
-        if key in self.LOW_MEDIUM_FILE_NAMES:
+        if key in self._low_medium_names_norm:
             # Force low/medium but always below alert threshold to avoid warning spam.
             adjusted = max(2.0, min(float(risk_result.get("total_score", 0.0)), 3.9))
             risk_result["total_score"] = round(adjusted, 2)
@@ -182,7 +188,7 @@ class DetectionEngine:
             risk_result["action"] = "log"
             risk_result["cvss_score"] = round(adjusted, 2)
             fn_policy["policy"] = "force_low_medium"
-        elif key in self.HIGH_RISK_FILE_NAMES:
+        elif key in self._high_risk_names_norm:
             adjusted = max(8.2, float(risk_result.get("total_score", 0.0)))
             risk_result["total_score"] = round(min(10.0, adjusted), 2)
             risk_result["risk_level"] = "high" if risk_result["total_score"] < 9.0 else "critical"
