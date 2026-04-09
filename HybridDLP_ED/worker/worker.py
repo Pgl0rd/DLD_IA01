@@ -76,27 +76,27 @@ class DetectionEngine:
         "listnhanvienmoi_2026.docx",
         "phieudenghibosungvanphongpham_2026.docx",
         "thongtinvanhanhthuongki_04_2026.docx",
-HIGH_RISK_FILE_NAMES = {
-    "bangluong_thang02_2026.csv",
-    "baocaotaichinhq1_2026.csv",
-    "danhsachcongnoq1_2026.csv",
-    "danhsachkhachhang_q1_2026.csv",
-    "hopdongdichvu_q1_2026.docx",
-    "hosokiemtoan_q1_2026.docx",
-    "tailieuchienluoc_q2_2026.docx",
-
-    "baocaothunhap_2026.xlsx",
-    "cautrucchiphi_2026.xlsx",
-    "chiphi_dautuban_dau_2026.xlsx",
-    "chiphiluongnhansu_2026.xlsx",
-    "chiphimarketing_2026.xlsx",
-    "hop_dong_ntt_du_an.docx",
-    "hop_dong_ntt_du_an.pdf",
-    "hop_dong_ntt_du_an_2.docx",
-    "hop_dong_ntt_du_an_2.pdf",
-    "hop_dong_ntt_du_an_3.docx",
-    "hop_dong_ntt_du_an_3.pdf",
-}
+    }
+    HIGH_RISK_FILE_NAMES = {
+        "bangluong_thang02_2026.csv",
+        "baocaotaichinhq1_2026.csv",
+        "danhsachcongnoq1_2026.csv",
+        "danhsachkhachhang_q1_2026.csv",
+        "hopdongdichvu_q1_2026.docx",
+        "hosokiemtoan_q1_2026.docx",
+        "tailieuchienluoc_q2_2026.docx",
+        "baocaothunhap_2026.xlsx",
+        "cautrucchiphi_2026.xlsx",
+        "chiphi_dautuban_dau_2026.xlsx",
+        "chiphiluongnhansu_2026.xlsx",
+        "chiphimarketing_2026.xlsx",
+        "hop_dong_ntt_du_an.docx",
+        "hop_dong_ntt_du_an.pdf",
+        "Hợp Đồng NTT Dự án (2).docx",
+        "Hợp Đồng NTT Dự án (2).pdf",
+        "Hợp Đồng NTT Dự án (3).docx",
+        "Hợp Đồng NTT Dự án (3).pdf",
+    }
     
     def __init__(self):
         logger.info("Initializing Detection Engine components...")
@@ -426,6 +426,18 @@ HIGH_RISK_FILE_NAMES = {
             # Special events that don't have file path but need behavioral rules analysis
             is_special_event = (
                 event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
+                # Network / browser exfil events often don't have a local file path.
+                or event_type in [
+                    'browser_upload',
+                    'http_upload',
+                    'file_upload',
+                    'network_upload',
+                    'network_flow',
+                    'network_flow_summary',
+                    'http_request',
+                    'cloud_exfiltration',
+                    'data_exfiltration',
+                ]
                 or event_type.startswith('corr_')
                 or 'tags' in event and any(str(t).startswith('corr_') for t in event.get('tags', []))
             )
