@@ -76,6 +76,14 @@ class WorkerConfig:
     POLICY_VERSION = os.getenv("POLICY_VERSION", "1.0.0").strip() or "1.0.0"
     # Chống alert lặp cùng hash (giây) — Noteupdate §19
     ALERT_DEDUP_SEC = float(os.getenv("ALERT_DEDUP_SEC", "600"))
+    # Khi bật: cảnh báo trùng nội dung gần giống (ssdeep) cũng gộp trong cửa sổ dedup,
+    # tránh phải gửi N file cùng nội dung (SHA khác nhau) mới thấy một lần alert hợp lý.
+    ALERT_DEDUP_USE_SSDEEP = os.getenv("ALERT_DEDUP_USE_SSDEEP", "1").strip().lower() in {"1", "true", "yes", "on"}
+    # Fuzzy hash (libfuzzy / ssdeep): cache “đã safe” và dedup alert theo độ tương đồng nội dung.
+    SSDEEP_ENABLED = os.getenv("SSDEEP_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    SSDEEP_MATCH_THRESHOLD = int(os.getenv("SSDEEP_MATCH_THRESHOLD", "90"))  # 0–100, ssdeep.compare
+    SSDEEP_MAX_FILE_MB = _env_float("SSDEEP_MAX_FILE_MB", 512.0)  # bỏ qua file quá lớn (tránh I/O nặng)
+    SSDEEP_SAFE_CANDIDATES_LIMIT = int(os.getenv("SSDEEP_SAFE_CANDIDATES_LIMIT", "400"))
     CACHE_CLEANUP_DAYS = 30  # Xóa cache cũ sau 30 ngày
     
     # Fast Scan — AUTO-DISCOVERY: tự động load TẤT CẢ file .yar trong YARA_RULES_DIR.

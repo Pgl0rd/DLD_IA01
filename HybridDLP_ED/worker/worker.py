@@ -166,11 +166,23 @@ class DetectionEngine:
                 continue
         return ""
 
+    def _filename_policy_band(self, event: dict, fallback_name: str = "") -> Optional[str]:
+        """'low_medium' | 'high' | None — dùng để bỏ qua rule ép điểm khác (force_max, behavioral boost)."""
+        key = self._normalize_filename(self._extract_event_file_name(event, fallback_name=fallback_name))
+        if not key:
+            return None
+        if key in self._low_medium_names_norm:
+            return "low_medium"
+        if key in self._high_risk_names_norm:
+            return "high"
+        return None
+
     def _apply_filename_risk_policy(self, event: dict, risk_result: dict, fallback_name: str = ""):
         """
-        Hardcoded policy by filename:
+        Hardcoded policy by filename (ưu tiên cuối cùng trên thang điểm):
         - LOW_MEDIUM list: force score into low/medium band.
         - HIGH list: force score into high band + alert.
+        Các file trong hai danh sách này không chịu ép điểm từ force_max_risk / behavioral boost (xử lý ở process_event).
         """
         file_name = self._extract_event_file_name(event, fallback_name=fallback_name)
         if not file_name:
@@ -505,6 +517,23 @@ class DetectionEngine:
                     self.processed_count += 1
                     return True
                 # Nếu cached là malicious, vẫn cần check lại (có thể policy thay đổi)
+
+            # Tên file trong whitelist demo: không ép điểm từ force_max / behavioral (xem _apply_filename_risk_policy).
+            fn_band = self._filename_policy_band(event, file_path.name)
+
+            # 2.5 Fuzzy hash (ssdeep): đã lưu safe trước đó với nội dung gần giống → bỏ qua quét lại (SHA có thể khác).
+            ssdeep_sig = ""
+            if getattr(WorkerConfig, "SSDEEP_ENABLED", True):
+                ssdeep_sig = self.hash_cache.calculate_ssdeep(file_path)
+                if ssdeep_sig:
+                    fuzzy_safe = self.hash_cache.find_fuzzy_safe_match(ssdeep_sig, int(size_bytes))
+                    if fuzzy_safe:
+                        logger.info(
+                            f"SSDEEP fuzzy cache hit (safe): {file_path.name} "
+                            f"match_score={fuzzy_safe.get('ssdeep_matched_score')}"
+                        )
+                        self.processed_count += 1
+                        return True
             
             # 3. Fast Scan (file content)
             fast_scan_result = self.fast_scan.scan_file(file_path, panic_mode)
@@ -588,7 +617,7 @@ class DetectionEngine:
             # Nếu có behavioral rule match, tăng risk score
             behavioral_risk_boost = 0
             behavioral_details = {}
-            if behavioral_matches:
+            if behavioral_matches and fn_band != "low_medium":
                 highest_match = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
                 if highest_match:
                     # Tăng risk score dựa trên severity
@@ -671,6 +700,8 @@ class DetectionEngine:
                 dst_path.startswith(folder) for folder in sensitive_folders
             )
             is_sensitive_folder_exfil = is_sensitive_folder_src and (not is_same_folder)
+            # Danh sách tên low/medium demo: không áp dụng force_max (ép lên max) — chỉ tin band filename + CVSS sau cùng.
+            force_max = is_sensitive_folder_exfil and fn_band != "low_medium"
             
             event_context = {
                 'action_type': action_type,
@@ -699,11 +730,11 @@ class DetectionEngine:
                 # UEBA ML anomaly detection
                 'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
                 'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
-                # Hard policy: any exfil from sensitive folders must be max score + alert
-                'force_max_risk': is_sensitive_folder_exfil,
+                # Hard policy: any exfil from sensitive folders must be max score + alert (trừ file trong whitelist tên low/medium)
+                'force_max_risk': force_max,
                 'force_max_risk_reason': (
                     f"Sensitive folder exfiltration from {src_path} to {dst_path}"
-                    if is_sensitive_folder_exfil else ''
+                    if force_max else ''
                 ),
                 '_event_data': event
             }
@@ -715,7 +746,7 @@ class DetectionEngine:
             )
 
             # Apply behavioral risk boost
-            if behavioral_risk_boost > 0:
+            if behavioral_risk_boost > 0 and fn_band != "low_medium":
                 risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
                 if "cvss_score" in risk_result:
                     risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
@@ -738,23 +769,26 @@ class DetectionEngine:
                 file_path
             )
             
-            # 8. Action Executor (với report fields); dedup alert cùng hash (Noteupdate §19)
+            # 8. Action Executor (với report fields); dedup alert: SHA hoặc ssdeep (nội dung gần giống, SHA khác nhau)
             action = risk_result['action']
             now_ts = time.time()
             dedup_sec = float(getattr(WorkerConfig, "ALERT_DEDUP_SEC", 600))
             suppress_alert = False
-            if action == "alert" and file_hash and dedup_sec > 0:
-                last_alert = self._alert_dedup.get(file_hash)
+            dedup_key = file_hash
+            if getattr(WorkerConfig, "ALERT_DEDUP_USE_SSDEEP", True) and ssdeep_sig:
+                dedup_key = f"ssdeep:{ssdeep_sig}"
+            if action == "alert" and dedup_key and dedup_sec > 0:
+                last_alert = self._alert_dedup.get(dedup_key)
                 if last_alert is not None and (now_ts - last_alert) < dedup_sec:
                     suppress_alert = True
                     logger.warning(
-                        f"Alert dedup: same SHA-256 within {dedup_sec}s — executed LOG instead of ALERT "
-                        f"(no Windows toast; dashboard action=allowed). hash={file_hash[:16]}… "
+                        f"Alert dedup: same key within {dedup_sec}s — executed LOG instead of ALERT "
+                        f"(no Windows toast; dashboard action=allowed). key={str(dedup_key)[:48]}… "
                         f"Disable dedup: ALERT_DEDUP_SEC=0"
                     )
             exec_action = "log" if suppress_alert else action
             if action == "alert" and not suppress_alert:
-                self._alert_dedup[file_hash] = now_ts
+                self._alert_dedup[dedup_key] = now_ts
             self.action_executor.execute(
                 exec_action,
                 file_path,
@@ -766,13 +800,16 @@ class DetectionEngine:
             
             # 9. Update Cache
             scan_result = 'malicious' if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert'] else 'safe'
+            if not ssdeep_sig and getattr(WorkerConfig, "SSDEEP_ENABLED", True):
+                ssdeep_sig = self.hash_cache.calculate_ssdeep(file_path)
             self.hash_cache.save_result(
                 file_hash,
                 str(file_path),
                 file_path.stat().st_size,
                 scan_result,
                 risk_result['total_score'],
-                action
+                action,
+                ssdeep_sig=ssdeep_sig,
             )
             try:
                 self._pqueue.insert_scan_result(

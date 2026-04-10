@@ -31,6 +31,10 @@ loguru>=0.7.0  # Better logging
 # Configuration
 python-dotenv>=1.0.0  # Environment variables
 
+# Fuzzy hashing (thuật toán ssdeep/spamsum) — cache & alert dedup theo nội dung gần giống (SHA có thể khác).
+# Mặc định dùng ppdeep (pure Python, cài được trên Windows). Package `ssdeep` (libfuzzy) là tùy chọn nếu build được.
+ppdeep>=0.1.0
+
 # Note: Windows notification packages (win10toast, plyer, pywin32) are NOT included here
 # because worker runs in Docker (Linux). Notifications are handled by agent (Windows).
 # windows_notification.py has fallback to console logging if packages are not available.
