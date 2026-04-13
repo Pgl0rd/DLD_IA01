@@ -185,6 +185,14 @@ class BehavioralMLAnalyzer:
         ) else 0.0
         app_risky = 1.0 if any(x in app for x in ("chrome", "edge", "discord", "telegram", "zalo", "chatgpt")) else 0.0
         file_size = float(event.get("size") or obj.get("size") or obj.get("size_bytes") or 0.0)
+        
+        is_file_op = 1.0 if any(x in e_type for x in ("file_", "upload", "usb_copy")) else 0.0
+        
+        clip_content = clipboard.get("content", "")
+        clip_len = clipboard.get("content_len", len(str(clip_content)))
+        actual_size = file_size if file_size > 0 else clip_len
+        is_small_fragment = 1.0 if (is_clipboard > 0.0 or is_file_op > 0.0) and 0 < actual_size < 512 else 0.0
+
         return {
             "is_clipboard": is_clipboard,
             "is_external": is_external,
@@ -192,6 +200,7 @@ class BehavioralMLAnalyzer:
             "is_rename_like": is_rename_like,
             "app_risky": app_risky,
             "file_size_mb": file_size / (1024.0 * 1024.0),
+            "is_small_fragment": is_small_fragment,
         }
 
     def _get_user_profile(self, user: str) -> Dict[str, Any]:
@@ -351,6 +360,20 @@ class BehavioralMLAnalyzer:
         elif clipboard_count >= 8:
             deviation += 0.6
             reasons.append("clipboard_elevated_10m")
+            
+        # Fragmented Exfiltration Check
+        small_clip_ext_1h = sum(
+            1 for e in recent_1h 
+            if self._event_signals(e).get("is_small_fragment", 0.0) > 0 
+            and (self._event_signals(e)["is_external"] > 0 or self._event_signals(e)["app_risky"] > 0)
+        )
+
+        if small_clip_ext_1h >= 4:
+            deviation += 2.5
+            reasons.append(f"fragmented_exfiltration_1h({small_clip_ext_1h})")
+        elif small_clip_ext_1h >= 2:
+            deviation += 1.0
+            reasons.append(f"suspicious_fragments_1h({small_clip_ext_1h})")
 
         if ext_count_1h >= 6:
             deviation += 2.2
@@ -363,7 +386,7 @@ class BehavioralMLAnalyzer:
             deviation += 1.2
             reasons.append("channel_baseline_drift")
 
-        if signal["app_risky"] > 0 and signal["is_clipboard"] > 0:
+        if signal["app_risky"] > 0 and signal["is_clipboard"] > 0 and small_clip_ext_1h < 2:
             deviation += 1.0
             reasons.append("risky_app_clipboard_sequence")
 
@@ -390,9 +413,15 @@ class BehavioralMLAnalyzer:
             incremental += 0.45
         if signal["is_archive"] > 0 or signal["is_rename_like"] > 0:
             incremental += 0.35
+            
+        # Fragmented Exfiltration accelerates accumulation significantly
+        if signal.get("is_small_fragment", 0.0) > 0 and (signal["is_external"] > 0 or signal["app_risky"] > 0):
+            incremental += 1.2
+            
         if profile_score >= 2.0:
             incremental += min(0.6, profile_score / 10.0)
-        value = min(3.0, value + incremental)  # cap accumulator contribution
+
+        value = min(6.0, value + incremental)  # Cap increased to allow fragmented exfil to raise error
 
         self._accumulator[user] = {"value": value, "ts": ts.timestamp()}
         return value
@@ -423,11 +452,11 @@ class BehavioralMLAnalyzer:
             if WorkerConfig is not None:
                 model_score = _normalize_anomaly_raw(raw_score, WorkerConfig)
                 threshold = float(getattr(WorkerConfig, "ML_ANOMALY_THRESHOLD", 7.0))
-                boost_factor = float(getattr(WorkerConfig, "ML_ANOMALY_RISK_BOOST_FACTOR", 0.0))
+                boost_factor = float(getattr(WorkerConfig, "ML_ANOMALY_RISK_BOOST_FACTOR", 1.0))
             else:
                 model_score = _clamp_0_10((raw_score + 1.0) * 5.0)
                 threshold = 7.0
-                boost_factor = 0.0
+                boost_factor = 1.0
 
             profile = self._profile_deviation(event, history)
             user = self._extract_user(event)
