@@ -28,6 +28,7 @@ from agent.sensors.context_correlator import ContextCorrelator
 from agent.sensors.endpoint_sensor import EndpointSensor
 from agent.sensors.browser_upload_sensor import BrowserUploadSensor
 from agent.queue_monitor import QueueMonitor
+from agent.event_filter import get_event_filter
 from agent.sensors.context import ContextProvider
 
 try:
@@ -401,11 +402,15 @@ def consumer_loop(
             event_canon = canonicalize_event(event)
 
             # Fila SQLite bền vững cho Worker (không enqueue heartbeat để giảm tải DB).
+            # Apply event filter trước khi enqueue
             if persistent_queue is not None:
                 try:
                     et = str(event_canon.get("type") or "").lower()
                     if et != "heartbeat":
-                        persistent_queue.enqueue(event_canon)
+                        # Apply event filter (L1 sensor filter)
+                        event_filter = get_event_filter()
+                        if not event_filter.should_drop(event_canon):
+                            persistent_queue.enqueue(event_canon)
                 except Exception:
                     pass
 
