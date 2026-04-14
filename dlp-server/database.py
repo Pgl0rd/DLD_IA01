@@ -4,10 +4,17 @@ Schema khớp hoàn toàn với alerts.json hiện tại
 """
 import sqlite3
 import json
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 DB_PATH = "dlp_events.db"
+
+# Timezone UTC+7 (Việt Nam)
+TZ_VN = timezone(timedelta(hours=7))
+
+def now_vn():
+    """Trả về datetime hiện tại theo múi giờ Việt Nam (UTC+7)"""
+    return datetime.now(tz=TZ_VN)
 
 
 def get_conn():
@@ -71,7 +78,7 @@ def insert_event(machine_name: str, event: dict) -> int:
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         machine_name,
-        datetime.utcnow().isoformat(),
+        now_vn().isoformat(),
         event.get("timestamp"),
         event.get("risk_score", 0),
         (event.get("action") or "").lower(),
@@ -95,7 +102,7 @@ def insert_batch(machine_name: str, events: list) -> int:
     if not events:
         return 0
     conn = get_conn()
-    now = datetime.utcnow().isoformat()
+    now = now_vn().isoformat()
     rows = [(
         machine_name, now,
         e.get("timestamp"),
@@ -214,7 +221,7 @@ def insert_agent(api_key: str, machine_name: str, display_name: str) -> bool:
         conn.execute("""
             INSERT INTO agents (api_key, machine_name, display_name, status, created_at)
             VALUES (?, ?, ?, 'active', ?)
-        """, (api_key, machine_name, display_name, datetime.utcnow().isoformat()))
+        """, (api_key, machine_name, display_name, now_vn().isoformat()))
         conn.commit()
         conn.close()
         return True
@@ -275,7 +282,7 @@ def update_agent_last_connection(api_key: str):
     conn = get_conn()
     conn.execute("""
         UPDATE agents SET last_connection = ? WHERE api_key = ?
-    """, (datetime.utcnow().isoformat(), api_key))
+    """, (now_vn().isoformat(), api_key))
     conn.commit()
     conn.close()
 
@@ -296,7 +303,7 @@ def is_agent_online(last_connection: Optional[str], timeout_seconds: int = 60) -
         return False
     try:
         last_ts = datetime.fromisoformat(last_connection)
-        now = datetime.utcnow()
+        now = now_vn()
         delta = (now - last_ts).total_seconds()
         return delta < timeout_seconds
     except:

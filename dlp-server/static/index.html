@@ -747,7 +747,7 @@ function render(stats, machines) {
 function renderTrend(events) {
   const buckets = {};
   events.forEach(e => {
-    const ts = e.timestamp || e.received_at; if (!ts) return;
+    const ts = e.received_at || e.timestamp; if (!ts) return;
     const key = ts.substring(0,16).replace('T',' ');
     buckets[key] = (buckets[key]||0)+1;
   });
@@ -816,12 +816,13 @@ function renderTable(events) {
       let content = '—';
       switch(col.id) {
         case 'machine_name': content = e.machine_name || '—'; break;
-        case 'timestamp': content = `<span style="white-space:nowrap;font-size:11px">${fmt(e.timestamp)}</span>`; break;
+        case 'timestamp': content = `<span style="white-space:nowrap;font-size:11px">${fmt(e.received_at || e.timestamp)}</span>`; break;
         case 'severity': content = `<span class="pill sev-${sev(e).toLowerCase()}">${sev(e)}</span>`; break;
         case 'action': content = `<span class="pill pill-${e.action}">${e.action}</span>`; break;
         case 'risk_score': content = `<span style="font-weight:600;color:${SEV_COLOR[sev(e)]}">${e.risk_score}</span>`; break;
         case 'user': content = e.user || '—'; break;
         case 'file_name': content = `<span style="max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.file_name}">${e.file_name || '—'}</span>`; break;
+        case 'window_title': content = `<span style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${e.window_title}">${e.window_title || '—'}</span>`; break;
         case 'source': content = e.source || '—'; break;
         case 'keywords': content = kws(e.keywords); break;
         case 'process_name': content = e.process_name || '—'; break;
@@ -850,7 +851,7 @@ async function openModal(id) {
     cont.innerHTML = `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">🖥 Máy</label><p style="margin:4px 0 0;font-weight:600">${e.machine_name||'—'}</p></div>
-        <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">⏰ Thời gian</label><p style="margin:4px 0 0;font-weight:600;white-space:nowrap">${fmt(e.timestamp)}</p></div>
+        <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">⏰ Thời gian</label><p style="margin:4px 0 0;font-weight:600;white-space:nowrap">${fmt(e.received_at || e.timestamp)}</p></div>
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">⚠️ Severity</label><p style="margin:4px 0 0"><span class="pill sev-${sev.toLowerCase()}">${sev}</span></p></div>
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">🎯 Risk</label><p style="margin:4px 0 0;font-weight:600;color:${SEV_COLOR[sev]};font-size:18px">${e.risk_score}</p></div>
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">✋ Action</label><p style="margin:4px 0 0"><span class="pill pill-${e.action}">${e.action}</span></p></div>
@@ -880,6 +881,7 @@ const COLUMN_DEFS = [
   { id: 'risk_score', label: '🎯 Risk', enabled: true },
   { id: 'user', label: '👤 User', enabled: true },
   { id: 'file_name', label: '📄 File', enabled: true },
+  { id: 'window_title', label: '🪟 Window Title', enabled: false },
   { id: 'source', label: '📍 Source', enabled: true },
   { id: 'keywords', label: '🔑 Keywords', enabled: true },
   { id: 'process_name', label: '⚙️ Process', enabled: true },
