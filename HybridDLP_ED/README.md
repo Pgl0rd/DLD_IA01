@@ -1,12 +1,12 @@
-# 🛡️ HybridDLP - Hybrid Data Loss Prevention System
+# [SEC] HybridDLP - Hybrid Data Loss Prevention System
 
-## 📋 Tổng quan
+##  Tổng quan
 
 HybridDLP là hệ thống phòng chống mất mát dữ liệu (Data Loss Prevention) sử dụng kiến trúc Event-Driven, kết hợp rule-based (YARA) và Machine Learning để phát hiện và ngăn chặn rò rỉ dữ liệu nhạy cảm.
 
 ---
 
-## 🏗️ Kiến trúc
+## ️ Kiến trúc
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -56,7 +56,7 @@ HybridDLP là hệ thống phòng chống mất mát dữ liệu (Data Loss Prev
 
 ---
 
-## 🚀 Quick Start
+## [START] Quick Start
 
 ### Prerequisites
 
@@ -110,7 +110,7 @@ streamlit run dashB.py
 
 ---
 
-## 📁 Cấu trúc Project
+##  Cấu trúc Project
 
 ```
 HybridDLP_ED/
@@ -143,7 +143,7 @@ HybridDLP_ED/
 
 ---
 
-## 🔧 Configuration
+##  Configuration
 
 ### Environment Variables
 
@@ -161,7 +161,7 @@ DEVICE_ID=...                 # Device identifier
 
 ---
 
-## 📊 Detection Engine (L3) - Architecture
+## [CHART] Detection Engine (L3) - Architecture
 
 ### Processing Pipeline
 
@@ -205,24 +205,24 @@ Event từ Agent (SQLite)
 
 ### Key Features
 
-- ✅ **Lazy Loading**: OCR/ML chỉ load khi cần
-- ✅ **Overload Protection**: Panic Mode khi queue > 1000
-- ✅ **Hash Cache**: Skip file đã scan (SQLite cache)
-- ✅ **Conditional OCR**: Chỉ OCR khi đủ điều kiện
-- ✅ **Risk Scoring**: Weighted formula (Content 50% + Behavior 30% + Context 20%)
+- [OK] **Lazy Loading**: OCR/ML chỉ load khi cần
+- [OK] **Overload Protection**: Panic Mode khi queue > 1000
+- [OK] **Hash Cache**: Skip file đã scan (SQLite cache)
+- [OK] **Conditional OCR**: Chỉ OCR khi đủ điều kiện
+- [OK] **Risk Scoring**: Weighted formula (Content 50% + Behavior 30% + Context 20%)
 
 ---
 
-## 📊 Detection Capabilities
+## [CHART] Detection Capabilities
 
 ### YARA Rules (12 rules)
 
-- ✅ **PII Detection**: CMND/CCCD, Phone numbers, Email, Bank accounts
-- ✅ **Financial Data**: Credit cards, Financial reports
-- ✅ **Sensitive Documents**: Contracts, HR data, Legal documents
-- ✅ **Code & Secrets**: API keys, Source code
-- ✅ **Export Detection**: CSV/Excel with sensitive data
-- ✅ **Archive Detection**: Password-protected archives
+- [OK] **PII Detection**: CMND/CCCD, Phone numbers, Email, Bank accounts
+- [OK] **Financial Data**: Credit cards, Financial reports
+- [OK] **Sensitive Documents**: Contracts, HR data, Legal documents
+- [OK] **Code & Secrets**: API keys, Source code
+- [OK] **Export Detection**: CSV/Excel with sensitive data
+- [OK] **Archive Detection**: Password-protected archives
 
 ### Detection Methods
 
@@ -243,7 +243,7 @@ Event từ Agent (SQLite)
 
 ---
 
-## 🐳 Docker Deployment
+##  Docker Deployment
 
 ### Services
 
@@ -321,7 +321,7 @@ docker-compose logs worker | grep -i yara
 
 ---
 
-## 📝 IPC Communication (SQLite)
+## [DOC] IPC Communication (SQLite)
 
 ### Data Flow
 
@@ -350,14 +350,14 @@ CREATE TABLE events (
 4. Update `last_processed_id`
 
 **Advantages:**
-- ✅ Simple: File-based, không cần external service
-- ✅ Reliable: SQLite WAL mode, durable writes
-- ✅ Portable: Single file, dễ backup/move
-- ✅ No Dependencies: Không cần Redis server
+- [OK] Simple: File-based, không cần external service
+- [OK] Reliable: SQLite WAL mode, durable writes
+- [OK] Portable: Single file, dễ backup/move
+- [OK] No Dependencies: Không cần Redis server
 
 ---
 
-## 🔧 Configuration Details
+##  Configuration Details
 
 ### Panic Mode
 
@@ -393,7 +393,7 @@ RISK_WEIGHTS = {
 
 ---
 
-## 🧪 Testing
+##  Testing
 
 ```bash
 # Test Docker setup
@@ -411,7 +411,7 @@ sqlite3 agent/runtime/events.db "SELECT COUNT(*) FROM events;"
 
 ---
 
-## 📚 Documentation
+##  Documentation
 
 - **Source Code**: Xem `worker/` directory
 - **YARA Rules**: Xem `worker/yara_rules/`
@@ -419,7 +419,7 @@ sqlite3 agent/runtime/events.db "SELECT COUNT(*) FROM events;"
 
 ---
 
-## ✅ Checklist Deployment
+## [OK] Checklist Deployment
 
 - [ ] Docker và Docker Compose đã cài đặt
 - [ ] YARA rules đã có trong `worker/yara_rules/`
@@ -433,7 +433,7 @@ sqlite3 agent/runtime/events.db "SELECT COUNT(*) FROM events;"
 
 ---
 
-## 🎯 Key Implementation Details
+## [TARGET] Key Implementation Details
 
 ### Queue Consumer (`core/queue_consumer.py`)
 - Đọc events từ SQLite
@@ -465,17 +465,17 @@ sqlite3 agent/runtime/events.db "SELECT COUNT(*) FROM events;"
 
 ---
 
-## 📝 License
+## [DOC] License
 
 [Your License Here]
 
-## 👥 Contributors
+##  Contributors
 
 [Your Team Here]
 
 ---
 
-## 🚀 Quick Setup
+## [START] Quick Setup
 
 ### **1. Setup ML Models (Optional)**
 ```bash
@@ -512,4 +512,4 @@ Xem chi tiết: [SETUP_GUIDE.md](SETUP_GUIDE.md) | [NEXT_STEPS.md](NEXT_STEPS.md
 
 ---
 
-**🛡️ Protect Your Data with HybridDLP**
+**[SEC] Protect Your Data with HybridDLP**

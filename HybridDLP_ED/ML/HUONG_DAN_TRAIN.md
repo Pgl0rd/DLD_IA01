@@ -1,6 +1,6 @@
 # Hướng Dẫn Train UEBA Model với CERT Dataset
 
-## 📋 Yêu cầu
+##  Yêu cầu
 
 1. **CERT Dataset** đã được download và đặt trong folder `HybridDLP_ED/Dataset/`
    - Cấu trúc: `Dataset/file.csv/file.csv`, `Dataset/email.csv/email.csv`, `Dataset/http.csv/http.csv`
@@ -10,7 +10,7 @@
    pip install pandas numpy scikit-learn joblib loguru
    ```
 
-## 🚀 Cách 1: Sử dụng Script Tự Động (Khuyến nghị)
+## [START] Cách 1: Sử dụng Script Tự Động (Khuyến nghị)
 
 ### Windows:
 ```bash
@@ -30,7 +30,7 @@ Script này sẽ:
 2. Load CERT dataset từ `Dataset/` folder
 3. Train model và lưu vào `worker/ml_models/ueba_iso_forest.pkl`
 
-## 🚀 Cách 2: Chạy Manual từng bước
+## [START] Cách 2: Chạy Manual từng bước
 
 ### Bước 1: Generate Synthetic Data (Tùy chọn)
 
@@ -70,7 +70,7 @@ python train_ueba.py \
     --output ../worker/ml_models/ueba_iso_forest.pkl
 ```
 
-## 📊 Các tham số Training
+## [CHART] Các tham số Training
 
 | Tham số | Mô tả | Mặc định |
 |---------|-------|----------|
@@ -81,7 +81,7 @@ python train_ueba.py \
 | `--contamination` | Tỷ lệ anomalies mong đợi (0.01 = 1%) | `0.01` |
 | `--n-estimators` | Số lượng trees trong Isolation Forest | `100` |
 
-## ✅ Kiểm tra kết quả
+## [OK] Kiểm tra kết quả
 
 Sau khi train xong, kiểm tra:
 
@@ -98,7 +98,7 @@ Sau khi train xong, kiểm tra:
 
 3. **Model sẽ tự động được load** khi L3 engine khởi động (nếu model path đúng)
 
-## 🔧 Troubleshooting
+##  Troubleshooting
 
 ### Lỗi: "CERT dataset files not found"
 - Kiểm tra đường dẫn: `Dataset/file.csv/file.csv` có tồn tại không
@@ -115,7 +115,7 @@ Sau khi train xong, kiểm tra:
 - Kiểm tra model path: `worker/ml_models/ueba_iso_forest.pkl`
 - Kiểm tra log của worker để xem có thông báo "UEBA model loaded" không
 
-## 📝 Ví dụ Output
+## [DOC] Ví dụ Output
 
 ```
 Loading 50000 file events from CERT dataset
@@ -136,7 +136,7 @@ Model saved to worker/ml_models/ueba_iso_forest.pkl
 Training completed!
 ```
 
-## 🎯 Kết quả mong đợi
+## [TARGET] Kết quả mong đợi
 
 - Model file: `worker/ml_models/ueba_iso_forest.pkl`
 - Model sẽ tự động được sử dụng trong L3 Detection Engine

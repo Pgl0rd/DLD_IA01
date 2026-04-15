@@ -1,4 +1,4 @@
-# 🚀 SETUP GUIDE - HybridDLP System
+# [START] SETUP GUIDE - HybridDLP System
 
 ## ⚡ Quick Setup (5 phút)
 
@@ -86,13 +86,13 @@ docker-compose logs worker | tail -20
 
 ---
 
-## 📋 Detailed Setup
+##  Detailed Setup
 
 ### **1. Prerequisites**
 
-- ✅ Docker & Docker Compose
-- ✅ Python 3.9+ (cho Agent và scripts)
-- ✅ Windows (cho Agent service)
+- [OK] Docker & Docker Compose
+- [OK] Python 3.9+ (cho Agent và scripts)
+- [OK] Windows (cho Agent service)
 
 ### **2. Install Dependencies**
 
@@ -207,7 +207,7 @@ docker-compose logs worker | grep -i "processed\|error"
 
 ---
 
-## 🧪 Testing
+##  Testing
 
 ### **Test 1: Create Test Event**
 
@@ -237,7 +237,7 @@ Worker sẽ detect và alert.
 
 ---
 
-## 🐛 Troubleshooting
+##  Troubleshooting
 
 ### **Worker không đọc được events**
 
@@ -274,7 +274,7 @@ docker-compose logs worker | grep -i yara
 
 ---
 
-## ✅ Checklist
+## [OK] Checklist
 
 - [ ] ML models đã train (optional)
 - [ ] Docker images đã build
@@ -287,4 +287,4 @@ docker-compose logs worker | grep -i yara
 
 ---
 
-**🎉 Setup completed! System is ready to use!**
+** Setup completed! System is ready to use!**

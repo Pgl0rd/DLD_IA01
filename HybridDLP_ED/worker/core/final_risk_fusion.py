@@ -1,6 +1,6 @@
 """
 Final Risk Fusion — Noteupdate §4 (công thức 2 khuyến nghị), thang 0–10.
-FinalRisk = min(10, 0.60*BaseScore + 0.25*MaturityNumeric + 0.15*EnvironmentalScore + AttackChainBonus)
+FinalRisk = min(10, 0.60*BaseScore + 0.25*TemparolNumeric + 0.15*EnvironmentalScore + AttackChainBonus)
 """
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ from config import WorkerConfig
 
 def fuse_final_risk(
     base_score: float,
-    maturity_numeric: float,
+    temparol_numeric: float,
     environmental_score: float,
     attack_chain_bonus: float,
     em_factor: float,
@@ -29,11 +29,11 @@ def fuse_final_risk(
     """
     fw = getattr(WorkerConfig, "CVSS_DLP_FUSION_WEIGHTS", None) or {
         "base": 0.60,
-        "maturity": 0.25,
+        "temparol": 0.25,
         "environmental": 0.15,
     }
     b = max(0.0, min(10.0, float(base_score)))
-    m = max(0.0, min(10.0, float(maturity_numeric)))
+    m = max(0.0, min(10.0, float(temparol_numeric)))
     e = max(0.0, min(10.0, float(environmental_score)))
     chain = max(0.0, min(2.0, float(attack_chain_bonus)))
 
@@ -43,7 +43,7 @@ def fuse_final_risk(
     else:
         total = (
             fw["base"] * b
-            + fw["maturity"] * m
+            + fw["temparol"] * m
             + fw["environmental"] * e
             + chain
         )

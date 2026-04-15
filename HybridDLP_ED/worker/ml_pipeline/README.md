@@ -4,7 +4,7 @@ Hệ thống Machine Learning phát hiện hành vi bất thường (Anomaly Det
 
 ## Cấu trúc
 
-- `feature_extractor.py`: Trích xuất 13 features từ events (temporal, frequency, quantitative, contextual)
+- `feature_extractor.py`: Trích xuất 13 features từ events (temparol, frequency, quantitative, contextual)
 - `behavioral_ml_analyzer.py`: Load model và predict anomaly score real-time
 - `train_ueba.py`: Training script với CERT dataset + Synthetic data
 
@@ -54,7 +54,7 @@ Nếu model không tồn tại, hệ thống vẫn chạy bình thường nhưng
 
 ## Features được trích xuất
 
-### Temporal Features (4)
+### Temparol Features (4)
 - `is_off_hours`: 1 nếu 18:00-08:00, 0 nếu trong giờ hành chính
 - `is_weekend`: 1 nếu T7/CN, 0 nếu ngày thường
 - `hour_of_day`: Giờ trong ngày [0, 1] (normalized)

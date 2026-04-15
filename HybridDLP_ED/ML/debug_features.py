@@ -77,7 +77,7 @@ def debug_features():
         print(f"\nKey Features Analysis:")
         print("-" * 80)
         
-        # Temporal
+        # Temparol
         is_off_hours_idx = feature_names.index('is_off_hours')
         hour_of_day_idx = feature_names.index('hour_of_day')
         print(f"  is_off_hours: {features[is_off_hours_idx]:.4f} (1.0 = off-hours)")
@@ -111,23 +111,23 @@ def debug_features():
         anomaly_score = 0.0
         
         if features[is_off_hours_idx] > 0.5:
-            print(f"  ⚠️  Off-hours activity detected")
+            print(f"  [WARN]  Off-hours activity detected")
             anomaly_score += 0.2
         
         if features[clipboard_pastes_idx] > 0.5:
-            print(f"  ⚠️  High clipboard paste frequency")
+            print(f"  [WARN]  High clipboard paste frequency")
             anomaly_score += 0.2
         
         if features[usb_bytes_idx] > 0.1:
-            print(f"  ⚠️  USB transfer detected")
+            print(f"  [WARN]  USB transfer detected")
             anomaly_score += 0.3
         
         if features[entropy_idx] > 0.8:
-            print(f"  ⚠️  High entropy (encrypted/sensitive)")
+            print(f"  [WARN]  High entropy (encrypted/sensitive)")
             anomaly_score += 0.2
         
         if features[dest_category_idx] > 0.4:  # Browser, Chat, Cloud, USB
-            print(f"  ⚠️  External destination")
+            print(f"  [WARN]  External destination")
             anomaly_score += 0.1
         
         print(f"\n  Estimated Anomaly Score (heuristic): {anomaly_score * 100:.2f}/100")

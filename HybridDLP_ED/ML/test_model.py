@@ -137,18 +137,18 @@ def test_model():
     model_path = Path(__file__).parent.parent / "worker" / "ml_models" / "ueba_iso_forest.pkl"
     
     if not model_path.exists():
-        logger.error(f"❌ Model not found at: {model_path}")
+        logger.error(f"[FAIL] Model not found at: {model_path}")
         logger.error("Please train model first using train_large_dataset.bat")
         return False
     
-    logger.info(f"✅ Loading model from: {model_path}")
+    logger.info(f"[OK] Loading model from: {model_path}")
     ml_analyzer = BehavioralMLAnalyzer(model_path)
     
     if not ml_analyzer.is_available():
-        logger.error("❌ Model failed to load!")
+        logger.error("[FAIL] Model failed to load!")
         return False
     
-    logger.info("✅ Model loaded successfully")
+    logger.info("[OK] Model loaded successfully")
     logger.info("")
     
     # Test scenarios
@@ -206,9 +206,9 @@ def test_model():
         
         # Interpret result
         if is_anomaly:
-            logger.info(f"  ⚠️  ALERT: This event is flagged as ANOMALOUS")
+            logger.info(f"  [WARN]  ALERT: This event is flagged as ANOMALOUS")
         else:
-            logger.info(f"  ✅ OK: This event is considered NORMAL")
+            logger.info(f"  [OK] OK: This event is considered NORMAL")
         
         results.append({
             'scenario': scenario_name,
@@ -225,7 +225,7 @@ def test_model():
     logger.info("=" * 60)
     
     for result in results:
-        status = "⚠️  ANOMALY" if result['is_anomaly'] else "✅ NORMAL"
+        status = "[WARN]  ANOMALY" if result['is_anomaly'] else "[OK] NORMAL"
         logger.info(f"{result['scenario']}: {status} (Score: {result['anomaly_score']:.2f})")
     
     logger.info("")
@@ -255,31 +255,31 @@ def test_model():
     # Analysis
     if normal_score < 50 and max_anomalous_score > normal_score:
         if max_anomalous_score > threshold:
-            logger.info("✅ Model is working correctly:")
+            logger.info("[OK] Model is working correctly:")
             logger.info("   - Normal events have low scores")
             logger.info(f"   - Anomalous events have high scores (>{threshold:.1f})")
         else:
-            logger.warning("⚠️  Model detects anomalies but scores are below threshold:")
+            logger.warning("[WARN]  Model detects anomalies but scores are below threshold:")
             logger.warning(f"   - Normal: {normal_score:.2f}")
             logger.warning(f"   - Anomalous: {max_anomalous_score:.2f} (threshold: {threshold:.1f})")
             logger.warning("")
-            logger.warning("💡 Recommendations:")
+            logger.warning("[TIP] Recommendations:")
             logger.warning("   1. Reduce threshold to 60: Edit worker/config.py → ML_ANOMALY_THRESHOLD = 60.0")
             logger.warning("   2. Train with more data: Use --sample-ratio 0.05 (5% instead of 1%)")
             logger.warning("   3. Increase contamination: Use --contamination 0.02 (2% instead of 1%)")
         return True
     else:
-        logger.warning("⚠️  Model may need more training data or tuning")
+        logger.warning("[WARN]  Model may need more training data or tuning")
         logger.warning("   - Consider training with more data (5-10% sample)")
         return True  # Still return True, model is functional
     
     logger.info("")
-    logger.info("✅ Model test completed!")
+    logger.info("[OK] Model test completed!")
 
 
 if __name__ == "__main__":
     success = test_model()
     if success:
-        print("\n✅ Model test passed!")
+        print("\n[OK] Model test passed!")
     else:
-        print("\n❌ Model test failed!")
+        print("\n[FAIL] Model test failed!")

@@ -75,7 +75,7 @@ def score_asset_context(ctx: Dict[str, Any]) -> float:
 
 
 def score_destination_environmental(ctx: Dict[str, Any]) -> float:
-    """0–10 — đích môi trường (khác channel maturity)."""
+    """0–10 — đích môi trường (khác channel temparol)."""
     dest = str(ctx.get("destination") or "").lower()
     if not dest:
         return 1.2

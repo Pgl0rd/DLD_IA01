@@ -38,7 +38,7 @@ def on_config_updated(new_config: Dict[str, Any]):
     """
     try:
         logger.info("=" * 60)
-        logger.info("🔄 Rules Configuration Updated from Server!")
+        logger.info(" Rules Configuration Updated from Server!")
         logger.info("=" * 60)
         
         # Log info về config mới
@@ -56,7 +56,7 @@ def on_config_updated(new_config: Dict[str, Any]):
         # Nếu có behavioral engine, reload rules
         try:
             # Behavioral rules sẽ automatically pick up new config từ config_provider
-            logger.info("✓ Behavioral rules will use new config from next check")
+            logger.info("[v] Behavioral rules will use new config from next check")
         except Exception as e:
             logger.error(f"Error reloading behavioral rules: {e}")
         
@@ -87,10 +87,10 @@ def initialize_config_sync():
         api_key = cfg.get_api_key()
         
         if not server_url or not api_key:
-            logger.error("❌ Server URL or API Key not configured!")
+            logger.error("[FAIL] Server URL or API Key not configured!")
             return None
         
-        logger.info(f"✓ Config loaded: {server_url}")
+        logger.info(f"[v] Config loaded: {server_url}")
         
         # Extract IP từ server_url (remove protocol)
         server_ip = server_url.replace('http://', '').replace('https://', '').split(':')[0]
@@ -109,11 +109,11 @@ def initialize_config_sync():
                 )
             
             if resp.status_code == 200:
-                logger.info(f"✓ Server is reachable (HTTP {resp.status_code})")
+                logger.info(f"[v] Server is reachable (HTTP {resp.status_code})")
                 data = resp.json()
                 if data.get('status') == 'ok':
                     config = data.get('config', {})
-                    logger.info(f"✓ Server config valid")
+                    logger.info(f"[v] Server config valid")
             else:
                 logger.warning(f"⚠ Server returned HTTP {resp.status_code}")
         except httpx.TimeoutException:
@@ -135,15 +135,15 @@ def initialize_config_sync():
         # ⭐ Start background sync
         config_sync.start()
         
-        logger.info("✓ Config Sync initialized successfully")
+        logger.info("[v] Config Sync initialized successfully")
         logger.info(f"  Sync interval: 30 seconds")
         logger.info(f"  Local cache: {Path(__file__).parent / 'runtime' / 'rules_config.json'}")
-        logger.info(f"\n🎉 Config Sync is ready!")
+        logger.info(f"\n Config Sync is ready!")
         
         return config_sync
         
     except Exception as e:
-        logger.error(f"❌ Failed to initialize config sync: {e}")
+        logger.error(f"[FAIL] Failed to initialize config sync: {e}")
         import traceback
         traceback.print_exc()
         return None

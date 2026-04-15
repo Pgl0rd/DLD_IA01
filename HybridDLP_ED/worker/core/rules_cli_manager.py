@@ -64,13 +64,13 @@ class RulesConfigCLI:
         """Thêm app"""
         if app_type == 'browser':
             self.manager.add_browser_app(app_name)
-            print(f"✓ Browser app '{app_name}' added")
+            print(f"[v] Browser app '{app_name}' added")
         elif app_type == 'messaging':
             if 'messaging_apps' not in self.manager.config['clipboard_paste_rule']:
                 self.manager.config['clipboard_paste_rule']['messaging_apps'] = []
             if app_name not in self.manager.config['clipboard_paste_rule']['messaging_apps']:
                 self.manager.config['clipboard_paste_rule']['messaging_apps'].append(app_name)
-                print(f"✓ Messaging app '{app_name}' added")
+                print(f"[v] Messaging app '{app_name}' added")
             else:
                 print(f"! App '{app_name}' already exists")
         
@@ -80,7 +80,7 @@ class RulesConfigCLI:
         """Thêm domain nhạy cảm"""
         self.manager.add_sensitive_domain(domain)
         self.manager.save_config()
-        print(f"✓ Domain '{domain}' added to sensitive list")
+        print(f"[v] Domain '{domain}' added to sensitive list")
     
     def add_keyword(self, keyword: str):
         """Thêm keyword"""
@@ -92,7 +92,7 @@ class RulesConfigCLI:
         if keyword not in self.manager.config['clipboard_paste_rule']['sensitive_title_keywords']:
             self.manager.config['clipboard_paste_rule']['sensitive_title_keywords'].append(keyword)
             self.manager.save_config()
-            print(f"✓ Keyword '{keyword}' added")
+            print(f"[v] Keyword '{keyword}' added")
         else:
             print(f"! Keyword '{keyword}' already exists")
     
@@ -106,7 +106,7 @@ class RulesConfigCLI:
         if drive not in self.manager.config['usb_rule']['removable_drives']:
             self.manager.config['usb_rule']['removable_drives'].append(drive)
             self.manager.save_config()
-            print(f"✓ Drive '{drive}' added")
+            print(f"[v] Drive '{drive}' added")
         else:
             print(f"! Drive '{drive}' already exists")
     
@@ -114,7 +114,7 @@ class RulesConfigCLI:
         """Xóa app"""
         self.manager.remove_app(app_name, app_type=f"{app_type}_apps")
         self.manager.save_config()
-        print(f"✓ App '{app_name}' removed from {app_type}_apps")
+        print(f"[v] App '{app_name}' removed from {app_type}_apps")
     
     def remove_domain(self, domain: str):
         """Xóa domain"""
@@ -122,7 +122,7 @@ class RulesConfigCLI:
         if domain in domains:
             domains.remove(domain)
             self.manager.save_config()
-            print(f"✓ Domain '{domain}' removed")
+            print(f"[v] Domain '{domain}' removed")
         else:
             print(f"! Domain '{domain}' not found")
     
@@ -174,13 +174,13 @@ class RulesConfigCLI:
         output_path = Path(output_file)
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(self.manager.config, f, indent=2, ensure_ascii=False)
-        print(f"✓ Config exported to {output_path}")
+        print(f"[v] Config exported to {output_path}")
     
     def import_config(self, input_file: str):
         """Import config from JSON"""
         input_path = Path(input_file)
         if not input_path.exists():
-            print(f"✗ File not found: {input_path}")
+            print(f"[x] File not found: {input_path}")
             return
         
         with open(input_path, 'r', encoding='utf-8') as f:
@@ -188,7 +188,7 @@ class RulesConfigCLI:
         
         self.manager.update_config(imported_config)
         self.manager.save_config()
-        print(f"✓ Config imported from {input_path}")
+        print(f"[v] Config imported from {input_path}")
 
 
 def main():
@@ -310,7 +310,7 @@ Examples:
         elif args.command == 'import':
             cli.import_config(args.input_file)
     except Exception as e:
-        print(f"✗ Error: {e}", file=sys.stderr)
+        print(f"[x] Error: {e}", file=sys.stderr)
         sys.exit(1)
 
 

@@ -1,7 +1,7 @@
 @echo off
 REM Setup ML models script for Windows
 
-echo 🔧 Setting up ML models...
+echo  Setting up ML models...
 
 cd worker
 
@@ -11,14 +11,14 @@ if not exist "dataset\sensitive" mkdir dataset\sensitive
 if not exist "dataset\normal" mkdir dataset\normal
 
 REM Collect dataset
-echo 📊 Collecting dataset...
+echo [CHART] Collecting dataset...
 python scripts\collect_dataset.py
 
 REM Train model
-echo 🤖 Training ML model...
+echo  Training ML model...
 python scripts\train_model.py
 
-echo ✅ ML models setup completed!
+echo [OK] ML models setup completed!
 echo    Models location: worker\ml_models\
 
 pause

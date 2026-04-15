@@ -1,6 +1,6 @@
 """
-Exfiltration Maturity (U/P/A/X) — Noteupdate §3.2, §5.
-MaturityScore = Channel + Concealment + Volume + Destination + Anomaly (signal groups)
+Exfiltration Temparol (U/P/A/X) — Noteupdate §3.2, §5.
+TemparolScore = Channel + Concealment + Volume + Destination + Anomaly (signal groups)
 Map: 0–24→U, 25–54→P, 55+→A; thiếu telemetry → X
 """
 from __future__ import annotations
@@ -192,7 +192,7 @@ def telemetry_insufficient(ctx: Dict[str, Any]) -> bool:
     return False
 
 
-def compute_exfiltration_maturity(
+def compute_exfiltration_temparol(
     fast_scan_result: Dict[str, Any],
     event_context: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -208,24 +208,24 @@ def compute_exfiltration_maturity(
     unknown = telemetry_insufficient(event_context)
     if unknown:
         em_code = "X"
-        maturity_band = "unknown_telemetry"
+        temparol_band = "unknown_telemetry"
     elif raw_sum <= 2.4:
         em_code = "U"
-        maturity_band = "preliminary"
+        temparol_band = "preliminary"
     elif raw_sum <= 5.4:
         em_code = "P"
-        maturity_band = "suspicious_attempt"
+        temparol_band = "suspicious_attempt"
     else:
         em_code = "A"
-        maturity_band = "active_exfiltration"
+        temparol_band = "active_exfiltration"
 
-    level_scores = getattr(WorkerConfig, "CVSS_DLP_MATURITY_LEVEL_SCORES", None) or {
+    level_scores = getattr(WorkerConfig, "CVSS_DLP_TEMPAROL_LEVEL_SCORES", None) or {
         "U": 2.0,
         "P": 5.0,
         "A": 8.5,
         "X": 3.5,
     }
-    maturity_numeric = float(level_scores.get(em_code, 3.5))
+    temparol_numeric = float(level_scores.get(em_code, 3.5))
 
     em_factors = getattr(WorkerConfig, "CVSS_DLP_EM_FACTORS", None) or {
         "U": 0.85,
@@ -236,10 +236,10 @@ def compute_exfiltration_maturity(
     em_factor = float(em_factors.get(em_code, 1.0))
 
     out = {
-        "exfiltration_maturity": em_code,
-        "maturity_band": maturity_band,
-        "maturity_score": round(raw_sum, 2),
-        "maturity_numeric": maturity_numeric,
+        "exfiltration_temparol": em_code,
+        "temparol_band": temparol_band,
+        "temparol_score": round(raw_sum, 2),
+        "temparol_numeric": temparol_numeric,
         "em_factor": em_factor,
         "channel_score": round(ch, 2),
         "concealment_score": round(co, 2),

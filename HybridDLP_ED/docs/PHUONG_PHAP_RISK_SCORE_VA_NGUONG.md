@@ -119,7 +119,7 @@ R_{total} = w_A A + w_B B + w_C C + w_T T + w_F F
 | Anomaly | \(A\) | 0,25 |
 | Behavioral deviation | \(B\) | 0,25 |
 | Content sensitivity | \(C\) | 0,30 |
-| Temporal | \(T\) | 0,10 |
+| Temparol | \(T\) | 0,10 |
 | Frequency | \(F\) | 0,10 |
 
 Trong đó \(A\) có thể kết hợp chỉ báo từ ML trong `deep_analysis` (xem `_calculate_anomaly_score` trong `risk_scoring.py`).

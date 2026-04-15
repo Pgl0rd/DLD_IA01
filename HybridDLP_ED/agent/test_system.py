@@ -27,25 +27,25 @@ def test_password_manager():
         set_password, verify_password, is_password_set
     )
     
-    print("✓ Imports successful")
+    print("[v] Imports successful")
     
     # Check first time
-    print(f"✓ is_password_set: {is_password_set()}")
+    print(f"[v] is_password_set: {is_password_set()}")
     
     # Set password
     print("Setting password: 'test1234'...")
     set_password("test1234")
-    print(f"✓ is_password_set: {is_password_set()}")
+    print(f"[v] is_password_set: {is_password_set()}")
     
     # Verify correct
     assert verify_password("test1234"), "Password verification failed"
-    print("✓ Correct password verified")
+    print("[v] Correct password verified")
     
     # Verify incorrect
     assert not verify_password("wrongpassword"), "Wrong password should fail"
-    print("✓ Wrong password rejected")
+    print("[v] Wrong password rejected")
     
-    print("✓ Password Manager test PASSED\n")
+    print("[v] Password Manager test PASSED\n")
 
 
 def test_config():
@@ -58,13 +58,13 @@ def test_config():
         get_config, get_server_url, get_api_key, update_config
     )
     
-    print("✓ Imports successful")
+    print("[v] Imports successful")
     
     # Get defaults
     server_url = get_server_url()
     api_key = get_api_key()
-    print(f"✓ Server URL: {server_url}")
-    print(f"✓ API Key: {api_key[:10]}...")
+    print(f"[v] Server URL: {server_url}")
+    print(f"[v] API Key: {api_key[:10]}...")
     
     # Update
     print("Updating config...")
@@ -73,13 +73,13 @@ def test_config():
     config = get_config()
     assert config.get_server_url() == "http://test-server:9000"
     assert config.get_api_key() == "test-api-key-123"
-    print("✓ Config updated successfully")
+    print("[v] Config updated successfully")
     
     # Reset
     update_config("http://100.91.22.25:8000", "dlp-key-may-ketoan-01")
-    print("✓ Config reset to defaults")
+    print("[v] Config reset to defaults")
     
-    print("✓ Config Manager test PASSED\n")
+    print("[v] Config Manager test PASSED\n")
 
 
 def test_service_manager():
@@ -91,13 +91,13 @@ def test_service_manager():
     from agent.service_manager import get_service_manager
     
     manager = get_service_manager()
-    print("✓ Service manager initialized")
+    print("[v] Service manager initialized")
     
     # Check status
-    print(f"✓ Sensor running: {manager.is_sensor_running()}")
-    print(f"✓ Worker running: {manager.is_worker_running()}")
+    print(f"[v] Sensor running: {manager.is_sensor_running()}")
+    print(f"[v] Worker running: {manager.is_worker_running()}")
     
-    print("✓ Service Manager test PASSED\n")
+    print("[v] Service Manager test PASSED\n")
 
 
 def test_server_tester():
@@ -110,14 +110,14 @@ def test_server_tester():
     
     # Test with invalid server
     success, msg = test_server_connection("http://invalid-server:9999", "invalid-key")
-    print(f"✓ Invalid server test: {msg[:50]}...")
+    print(f"[v] Invalid server test: {msg[:50]}...")
     assert not success, "Invalid server should fail"
     
     # Test with valid-looking server (may not actually respond)
     success, msg = test_server_connection("http://localhost:8000", "test-key")
-    print(f"✓ Localhost test result: {msg[:50]}...")
+    print(f"[v] Localhost test result: {msg[:50]}...")
     
-    print("✓ Server Tester test PASSED\n")
+    print("[v] Server Tester test PASSED\n")
 
 
 def test_agent_sender():
@@ -128,10 +128,10 @@ def test_agent_sender():
     
     from agent.agent_sender import SERVER_URL, API_KEY
     
-    print(f"✓ SERVER_URL: {SERVER_URL}")
-    print(f"✓ API_KEY: {API_KEY[:10]}...")
+    print(f"[v] SERVER_URL: {SERVER_URL}")
+    print(f"[v] API_KEY: {API_KEY[:10]}...")
     
-    print("✓ Agent Sender test PASSED\n")
+    print("[v] Agent Sender test PASSED\n")
 
 
 def main():
@@ -150,7 +150,7 @@ def main():
         test_agent_sender()
         
         print("=" * 60)
-        print("✅ ALL TESTS PASSED!")
+        print("[OK] ALL TESTS PASSED!")
         print("=" * 60)
         print()
         print("Ready to start HybridDLP:")
@@ -159,10 +159,10 @@ def main():
         print()
         
     except AssertionError as e:
-        print(f"\n❌ TEST FAILED: {e}\n")
+        print(f"\n[FAIL] TEST FAILED: {e}\n")
         return 1
     except Exception as e:
-        print(f"\n❌ ERROR: {e}\n")
+        print(f"\n[FAIL] ERROR: {e}\n")
         import traceback
         traceback.print_exc()
         return 1

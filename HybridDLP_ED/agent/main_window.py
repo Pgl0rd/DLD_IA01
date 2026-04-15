@@ -24,7 +24,7 @@ class MainWindow:
     
     def __init__(self, on_close_callback=None):
         self.root = tk.Tk()
-        self.root.title("🔒 HybridDLP - Control Center")
+        self.root.title(" HybridDLP - Control Center")
         self.root.geometry("500x450")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -107,7 +107,7 @@ class MainWindow:
         # Title
         title = ttk.Label(
             self.main_frame,
-            text="🎛️  Control Center",
+            text="️  Control Center",
             font=("Segoe UI", 14, "bold")
         )
         title.pack(pady=(0, 15))
@@ -125,7 +125,7 @@ class MainWindow:
         
         ttk.Button(sensor_btn_frame, text="▶️  Start", command=self._start_sensor).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(sensor_btn_frame, text="⏹️  Stop", command=self._stop_sensor).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(sensor_btn_frame, text="🔄 Refresh", command=self._update_sensor_status).pack(side=tk.LEFT)
+        ttk.Button(sensor_btn_frame, text=" Refresh", command=self._update_sensor_status).pack(side=tk.LEFT)
         
         # Worker section
         worker_frame = ttk.LabelFrame(self.main_frame, text="Worker", padding=10)
@@ -140,13 +140,13 @@ class MainWindow:
         
         ttk.Button(worker_btn_frame, text="▶️  Start", command=self._start_worker).pack(side=tk.LEFT, padx=(0, 5))
         ttk.Button(worker_btn_frame, text="⏹️  Stop", command=self._stop_worker).pack(side=tk.LEFT, padx=(0, 5))
-        ttk.Button(worker_btn_frame, text="🔄 Refresh", command=self._update_worker_status).pack(side=tk.LEFT)
+        ttk.Button(worker_btn_frame, text=" Refresh", command=self._update_worker_status).pack(side=tk.LEFT)
         
         # Config section
         config_frame = ttk.LabelFrame(self.main_frame, text="Configuration", padding=10)
         config_frame.pack(fill=tk.X, pady=(0, 10))
         
-        ttk.Button(config_frame, text="⚙️  Edit Server Settings", command=self._show_config_dialog).pack(fill=tk.X)
+        ttk.Button(config_frame, text="[SYS]  Edit Server Settings", command=self._show_config_dialog).pack(fill=tk.X)
         
         # Bottom buttons
         btn_frame = ttk.Frame(self.main_frame)
@@ -158,13 +158,13 @@ class MainWindow:
     def _update_sensor_status(self):
         """Update sensor status."""
         is_running = self.manager.is_sensor_running()
-        status_text = "🟢 Running" if is_running else "🔴 Stopped"
+        status_text = " Running" if is_running else " Stopped"
         self.sensor_status_label.config(text=status_text)
     
     def _update_worker_status(self):
         """Update worker status."""
         is_running = self.manager.is_worker_running()
-        status_text = "🟢 Running" if is_running else "🔴 Stopped"
+        status_text = " Running" if is_running else " Stopped"
         self.worker_status_label.config(text=status_text)
     
     def _start_sensor(self):
@@ -234,9 +234,9 @@ class MainWindow:
         def toggle_api_key():
             show_key_var.set(not show_key_var.get())
             key_entry.config(show="" if show_key_var.get() else "*")
-            show_btn.config(text="👁️ Hide" if show_key_var.get() else "👁️ Show")
+            show_btn.config(text="️ Hide" if show_key_var.get() else "️ Show")
         
-        show_btn = ttk.Button(key_frame, text="👁️ Show", command=toggle_api_key, width=8)
+        show_btn = ttk.Button(key_frame, text="️ Show", command=toggle_api_key, width=8)
         show_btn.pack(side=tk.RIGHT)
         
         # Test button frame
@@ -255,7 +255,7 @@ class MainWindow:
             color = "green" if success else "red"
             status_label.config(foreground=color)
         
-        ttk.Button(test_btn_frame, text="🔌 Test", command=test_connection).pack(side=tk.RIGHT, padx=(5, 0))
+        ttk.Button(test_btn_frame, text=" Test", command=test_connection).pack(side=tk.RIGHT, padx=(5, 0))
         
         def save_config():
             try:
@@ -287,7 +287,7 @@ class MainWindow:
         try:
             self.root.mainloop()
         except Exception as e:
-            print(f"❌ Window error: {e}")
+            print(f"[FAIL] Window error: {e}")
 
 
 def show_main_window(on_close_callback=None):

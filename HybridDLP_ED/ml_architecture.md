@@ -73,7 +73,7 @@ flowchart TD
 flowchart LR
     EVT(["Event Dict"])
 
-    EVT --> T["Temporal\n4 features"]
+    EVT --> T["Temparol\n4 features"]
     T --> T1["is_off_hours\nhour < 8 or >= 18"]
     T --> T2["is_weekend\nweekday >= 5"]
     T --> T3["hour_of_day / 23"]
@@ -144,7 +144,7 @@ flowchart TD
 
 `EventFeatureExtractor.extract(event)` → `np.ndarray(13,)`
 
-### Nhóm 1: Temporal (4 features)
+### Nhóm 1: Temparol (4 features)
 
 | Index | Tên | Mô tả | Normalize |
 |---|---|---|---|

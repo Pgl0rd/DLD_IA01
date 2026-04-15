@@ -59,7 +59,7 @@ class QueueMonitor:
             elif self.panic_mode and util <= self.panic_off_threshold:
                 self.panic_mode = False
 
-            # ✅ sync panic_mode về QueueManager để enqueue_event() drop ưu tiên
+            # [OK] sync panic_mode về QueueManager để enqueue_event() drop ưu tiên
             self.qm.panic_mode = self.panic_mode
 
             state = {

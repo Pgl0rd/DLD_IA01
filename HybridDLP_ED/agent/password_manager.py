@@ -38,7 +38,7 @@ class PasswordManager:
                     data = json.load(f)
                     self._password_hash = data.get("password_hash")
             except Exception as e:
-                print(f"❌ Lỗi tải password: {e}")
+                print(f"[FAIL] Lỗi tải password: {e}")
     
     def _save(self):
         """Lưu password hash vào file."""
@@ -47,7 +47,7 @@ class PasswordManager:
             with open(PASSWORD_FILE, "w", encoding="utf-8") as f:
                 json.dump({"password_hash": self._password_hash}, f)
         except Exception as e:
-            print(f"❌ Lỗi lưu password: {e}")
+            print(f"[FAIL] Lỗi lưu password: {e}")
     
     def set_password(self, password: str) -> None:
         """Set password mới (salt + hash)."""

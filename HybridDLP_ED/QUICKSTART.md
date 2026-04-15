@@ -1,14 +1,14 @@
-# 🚀 HybridDLP Control System - Quickstart
+# [START] HybridDLP Control System - Quickstart
 
 ## What is This?
 
 Hệ thống quản lý HybridDLP với giao diện thân thiện:
-- ✅ Lần đầu setup: Set mật khẩu → Server URL/Key → Khởi động services
-- ✅ System Tray: Quản lý từ background
-- ✅ Control Center: Dashboard quản lý services
-- ✅ Bảo mật: Tất cả thao tác yêu cầu password
+- [OK] Lần đầu setup: Set mật khẩu → Server URL/Key → Khởi động services
+- [OK] System Tray: Quản lý từ background
+- [OK] Control Center: Dashboard quản lý services
+- [OK] Bảo mật: Tất cả thao tác yêu cầu password
 
-## 🚀 Getting Started (2 steps)
+## [START] Getting Started (2 steps)
 
 ### Step 1: Install dependencies
 ```bash
@@ -25,26 +25,26 @@ start_hybridlp.bat
 python agent/boot.py
 ```
 
-That's it! 🎉
+That's it! 
 
-## 🎯 First Run Experience
+## [TARGET] First Run Experience
 
 1. **Popup 1**: "Set Master Password" → Input password (≥4 chars)
 2. **Popup 2**: "Server Configuration" → Input Server URL + API Key
 3. **Popup 3**: "Start Services" → Choose Sensor/Worker to start
 4. **System Tray**: Icon appears, click to manage
 
-## 🎮 Control Center
+##  Control Center
 
 Click system tray icon → Enter password → Dashboard
 
 **Features:**
 - ▶️ Start/Stop Sensor
 - ▶️ Start/Stop Worker
-- ⚙️ Edit Server Settings
-- 🔐 Logout
+- [SETTING] Edit Server Settings
+-  Logout
 
-## 📁 Data Storage
+##  Data Storage
 
 ```
 agent/runtime/config/
@@ -52,14 +52,14 @@ agent/runtime/config/
 └── config.json        (Server URL + API Key)
 ```
 
-## 🔐 Security Note
+##  Security Note
 
 - Password stored as hash (not plain text)
 - PBKDF2 SHA256 with 32-byte salt
 - 100,000 iterations
 - Requires authentication for all operations
 
-## 🧪 Test Everything
+##  Test Everything
 
 ```bash
 python agent/test_system.py
@@ -67,10 +67,10 @@ python agent/test_system.py
 
 Expected output:
 ```
-✅ ALL TESTS PASSED!
+[OK] ALL TESTS PASSED!
 ```
 
-## 📚 Full Documentation
+##  Full Documentation
 
 See: `HYBRIDLP_SYSTEM_GUIDE.md`
 
@@ -92,7 +92,7 @@ rmdir /s agent\runtime\config
 agent/runtime/events.jsonl
 ```
 
-## 🎯 What's Inside
+## [TARGET] What's Inside
 
 | Component | Purpose |
 |-----------|---------|
@@ -104,7 +104,7 @@ agent/runtime/events.jsonl
 | `system_tray_app.py` | Background icon |
 | `boot.py` | Application entry |
 
-## 📞 Quick Links
+##  Quick Links
 
 - **Main entry:** `python agent/boot.py`
 - **Setup again:** `python agent/setup_wizard.py`
@@ -113,4 +113,4 @@ agent/runtime/events.jsonl
 
 ---
 
-**Ready?** Run: `start_hybridlp.bat` 🚀
+**Ready?** Run: `start_hybridlp.bat` [START]

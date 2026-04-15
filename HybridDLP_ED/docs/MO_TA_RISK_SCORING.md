@@ -105,7 +105,7 @@ R = w_A A + w_B B + w_C C + w_T T + w_F F
 - **A (Anomaly)**: ML anomaly (chuẩn hoá hoặc 0–100) + boost theo số YARA/IOC, ZIP, ML sensitive.
 - **B (Behavioral deviation)**: nếu **chưa có baseline** user → **50** (trung tính); nếu có baseline → Z-score các metric (`file_accesses_last_1h`, USB, paste, URL, …).
 - **C (Content sensitivity)**: YARA/IOC với trọng số nhóm (id/credit/api/email/…), ML, OCR.
-- **T (Temporal)**: ngoài giờ / cuối tuần (0–45 điểm theo tổ hợp).
+- **T (Temparol)**: ngoài giờ / cuối tuần (0–45 điểm theo tổ hợp).
 - **F (Frequency)**: paste 1h, copy USB 24h, URL 24h — nhân **frequency multiplier** (1.0–2.5) theo mức đếm.
 
 ---
@@ -122,10 +122,10 @@ R = w_A A + w_B B + w_C C + w_T T + w_F F
    - **Behavior anomaly**: `behavioral_risk_boost`, `ml_anomaly_score`, cờ `ml_is_anomaly`.
    - **Confidence**: số match YARA / suspicious / ML.
 
-2. **Exfiltration maturity (U / P / A / X)** — `exfiltration_maturity.compute_exfiltration_maturity`:
+2. **Exfiltration temparol (U / P / A / X)** — `exfiltration_temparol.compute_exfiltration_temparol`:
    - Cộng điểm các nhóm: **channel**, **concealment**, **volume**, **destination**, **anomaly** (mỗi nhóm có trần riêng).
    - Map tổng điểm thô → mức **U** (≤24), **P** (25–54), **A** (≥55), hoặc **X** nếu telemetry thiếu / cờ unknown.
-   - Gán **`maturity_numeric`** và **`em_factor`** theo bảng `CVSS_DLP_MATURITY_LEVEL_SCORES` và `CVSS_DLP_EM_FACTORS`.
+   - Gán **`temparol_numeric`** và **`em_factor`** theo bảng `CVSS_DLP_TEMPAROL_LEVEL_SCORES` và `CVSS_DLP_EM_FACTORS`.
 
 3. **Environmental score (0–100)** — `environmental_scoring.compute_environmental_score`:
    - Trọng số `CVSS_DLP_ENV_WEIGHTS`: user, time, asset, destination (mỗi mục một hàm con 0–100).
@@ -133,7 +133,7 @@ R = w_A A + w_B B + w_C C + w_T T + w_F F
 4. **Attack chain bonus** — `attack_chain.compute_attack_chain_bonus` (tối đa 20, cộng vào tổng sau fusion).
 
 5. **Fusion** — `final_risk_fusion.fuse_final_risk` (**công thức 2 mặc định**):  
-   `FinalRisk = min(100, F_base*Base + F_mat*MaturityNumeric + F_env*Environmental + ChainBonus)`  
+   `FinalRisk = min(100, F_base*Base + F_mat*TemparolNumeric + F_env*Environmental + ChainBonus)`  
    với `CVSS_DLP_FUSION_WEIGHTS` (mặc định 0.60 / 0.25 / 0.15).  
    Nếu `CVSS_DLP_USE_FORMULA1=1`: biến thể nhân `em_factor` lên base (xem comment trong code).
 
@@ -156,7 +156,7 @@ Kết quả trả về có `details.cvss_dlp` chứa đầy đủ thành phần 
 | `RISK_LIKELIHOOD_ALPHA` | Trọng số Sb trong likelihood (multiplicative) |
 | `ML_ANOMALY_BEHAVIOR_BLEND` | β gộp anomaly vào behavior (`traditional`) |
 | `ML_ANOMALY_NORM_METHOD`, `ML_ANOMALY_P5`, `ML_ANOMALY_P95`, … | Chuẩn hoá tín hiệu anomaly |
-| `CVSS_DLP_*` | Trọng số base, fusion, maturity, environmental, EM factor, công thức 1 |
+| `CVSS_DLP_*` | Trọng số base, fusion, temparol, environmental, EM factor, công thức 1 |
 
 Chi tiết đầy đủ nằm trong **`worker/config.py`**.
 
@@ -166,9 +166,9 @@ Chi tiết đầy đủ nằm trong **`worker/config.py`**.
 
 - **Agent L1** không tính risk score tổng hợp này; phần lớn logic nằm ở **Worker**.
 - **`research_based`**: điểm **behavioral deviation** phụ thuộc baseline user — nếu chưa nạp baseline, nhánh B luôn ~50.
-- **`cvss_dlp`** phụ thuộc **`event_context`** đầy đủ (thời gian, destination, `force_max_risk`, …) để environmental và maturity phản ánh đúng.
+- **`cvss_dlp`** phụ thuộc **`event_context`** đầy đủ (thời gian, destination, `force_max_risk`, …) để environmental và temparol phản ánh đúng.
 - Mọi phương pháp đều dùng chung **`classify_risk_level`** và ngưỡng **`RISK_THRESHOLDS`** cho `action` (trừ khi `force_max_risk` trong NIST/CVSS-DLP xử lý riêng).
 
 ---
 
-*Tài liệu căn cự mã nguồn tại `HybridDLP_ED/worker/core/risk_scoring.py`, `worker/config.py` và các module `base_scoring.py`, `exfiltration_maturity.py`, `environmental_scoring.py`, `final_risk_fusion.py`, `cvss_dlp_orchestrator.py`. Khi đổi config hoặc công thức, nên cập nhật lại mục tương ứng trong file này.*
+*Tài liệu căn cự mã nguồn tại `HybridDLP_ED/worker/core/risk_scoring.py`, `worker/config.py` và các module `base_scoring.py`, `exfiltration_temparol.py`, `environmental_scoring.py`, `final_risk_fusion.py`, `cvss_dlp_orchestrator.py`. Khi đổi config hoặc công thức, nên cập nhật lại mục tương ứng trong file này.*

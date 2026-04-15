@@ -27,7 +27,7 @@ class SetupWizard:
     
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("🔧 HybridDLP - First Time Setup")
+        self.root.title(" HybridDLP - First Time Setup")
         self.root.geometry("500x400")
         self.root.resizable(False, False)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -163,7 +163,7 @@ class SetupWizard:
         
         ttk.Button(
             test_btn_frame,
-            text="🔌 Test Connection",
+            text=" Test Connection",
             command=self._test_connection
         ).pack(side=tk.LEFT, padx=(0, 5))
         
@@ -184,10 +184,10 @@ class SetupWizard:
         api_key = self.api_key_var.get().strip()
         
         if not server_url:
-            self.connection_status.config(text="❌ Server URL trống", foreground="red")
+            self.connection_status.config(text="[FAIL] Server URL trống", foreground="red")
             return
         if not api_key:
-            self.connection_status.config(text="❌ API Key trống", foreground="red")
+            self.connection_status.config(text="[FAIL] API Key trống", foreground="red")
             return
         
         # Show testing status
@@ -292,17 +292,17 @@ class SetupWizard:
         if self.start_sensor_var.get():
             success, msg = manager.start_sensor()
             if success:
-                self.status_label.config(text=self.status_label.cget("text") + "\n✓ Sensor: " + msg, foreground="green")
+                self.status_label.config(text=self.status_label.cget("text") + "\n[v] Sensor: " + msg, foreground="green")
             else:
-                self.status_label.config(text=self.status_label.cget("text") + "\n✗ Sensor: " + msg, foreground="red")
+                self.status_label.config(text=self.status_label.cget("text") + "\n[x] Sensor: " + msg, foreground="red")
             self.root.update()
         
         if self.start_worker_var.get():
             success, msg = manager.start_worker()
             if success:
-                self.status_label.config(text=self.status_label.cget("text") + "\n✓ Worker: " + msg, foreground="green")
+                self.status_label.config(text=self.status_label.cget("text") + "\n[v] Worker: " + msg, foreground="green")
             else:
-                self.status_label.config(text=self.status_label.cget("text") + "\n✗ Worker: " + msg, foreground="red")
+                self.status_label.config(text=self.status_label.cget("text") + "\n[x] Worker: " + msg, foreground="red")
             self.root.update()
         
         self.result = True
@@ -343,7 +343,7 @@ class SetupWizard:
             self.root.mainloop()
             return self.result
         except Exception as e:
-            print(f"❌ Setup wizard error: {e}")
+            print(f"[FAIL] Setup wizard error: {e}")
             return False
 
 

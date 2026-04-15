@@ -184,9 +184,9 @@ Neu ban muon, buoc tiep theo minh co the tach tai lieu rieng:
 - `HUONG_DAN_CHAY_NATIVE.md` (khong docker)
 - `HUONG_DAN_CHAY_DOCKER.md` (docker)
 de khong bi lon thong tin.
-# 📖 HƯỚNG DẪN CHẠY TOÀN BỘ HỆ THỐNG HybridDLP
+#  HƯỚNG DẪN CHẠY TOÀN BỘ HỆ THỐNG HybridDLP
 
-## 📋 Mục lục
+##  Mục lục
 
 1. [Tổng quan hệ thống](#tổng-quan-hệ-thống)
 2. [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
@@ -198,7 +198,7 @@ de khong bi lon thong tin.
 
 ---
 
-## 🎯 Tổng quan hệ thống
+## [TARGET] Tổng quan hệ thống
 
 HybridDLP gồm 3 thành phần chính:
 
@@ -246,7 +246,7 @@ HybridDLP gồm 3 thành phần chính:
 
 ---
 
-## 🔧 Yêu cầu hệ thống
+##  Yêu cầu hệ thống
 
 ### Bắt buộc
 
@@ -262,7 +262,7 @@ HybridDLP gồm 3 thành phần chính:
 
 ---
 
-## 📦 Cài đặt
+##  Cài đặt
 
 ### Bước 1: Clone/Download source code
 
@@ -321,7 +321,7 @@ python scripts/train_model.py
 
 ---
 
-## 🚀 Chạy hệ thống
+## [START] Chạy hệ thống
 
 ### Phương án 1: Docker (Khuyến nghị - Dễ nhất)
 
@@ -442,7 +442,7 @@ python service.py start
 
 ---
 
-## ✅ Kiểm tra và xác minh
+## [OK] Kiểm tra và xác minh
 
 ### 1. Kiểm tra Agent
 
@@ -477,10 +477,10 @@ cat worker/logs/detection_engine.log | tail -20
 
 - Mở http://localhost:8501
 - Kiểm tra:
-  - ✅ Dashboard load được
-  - ✅ Có hiển thị statistics
-  - ✅ Có hiển thị alerts (nếu có)
-  - ✅ Auto-refresh hoạt động
+  - [OK] Dashboard load được
+  - [OK] Có hiển thị statistics
+  - [OK] Có hiển thị alerts (nếu có)
+  - [OK] Auto-refresh hoạt động
 
 ### 4. Test với file nhạy cảm
 
@@ -496,7 +496,7 @@ echo "CMND: 123456789" > test_cmnd.txt
 
 ---
 
-## 🔍 Troubleshooting
+## [SEARCH] Troubleshooting
 
 ### Vấn đề 1: Docker không start được
 
@@ -577,7 +577,7 @@ docker-compose restart dashboard
 
 ---
 
-## ⚙️ Cấu hình nâng cao
+## [SETTING] Cấu hình nâng cao
 
 ### Cấu hình Worker
 
@@ -636,7 +636,7 @@ RUNTIME_DIR=C:\PRJ\ProjectIA\DLD_IA01\HybridDLP_ED\agent\runtime
 
 ---
 
-## 📊 Monitoring và Logs
+## [CHART] Monitoring và Logs
 
 ### Logs Location
 
@@ -671,7 +671,7 @@ docker-compose logs worker | grep -i "yara\|match"
 
 ---
 
-## 🛑 Dừng hệ thống
+##  Dừng hệ thống
 
 ### Docker
 
@@ -698,7 +698,7 @@ docker-compose down -v
 
 ---
 
-## 📝 Checklist chạy hệ thống
+## [DOC] Checklist chạy hệ thống
 
 ### Trước khi chạy
 
@@ -725,7 +725,7 @@ docker-compose down -v
 
 ---
 
-## 🎯 Quick Reference
+## [TARGET] Quick Reference
 
 ### Start tất cả (Docker)
 
@@ -770,7 +770,7 @@ echo "CMND: 123456789" > test.txt
 
 ---
 
-## 📚 Tài liệu tham khảo
+##  Tài liệu tham khảo
 
 - **Architecture:** `docs/architecture.md`
 - **Setup Guide:** `SETUP_GUIDE.md`
@@ -779,7 +779,7 @@ echo "CMND: 123456789" > test.txt
 
 ---
 
-## 🆘 Hỗ trợ
+##  Hỗ trợ
 
 Nếu gặp vấn đề:
 
@@ -791,4 +791,4 @@ Nếu gặp vấn đề:
 
 ---
 
-**🎉 Chúc bạn chạy hệ thống thành công!**
+** Chúc bạn chạy hệ thống thành công!**

@@ -10,7 +10,7 @@ import streamlit.components.v1 as components
 # ================= CONFIG =================
 st.set_page_config(
     page_title="Hybrid DLP Security Center",
-    page_icon="🛡️",
+    page_icon="[SEC]",
     layout="wide"
 )
 
@@ -50,7 +50,7 @@ def load_data():
             with open(LOG_FILE, "w", encoding="utf-8") as f:
                 json.dump([], f, ensure_ascii=False)
         except Exception as e:
-            st.error(f"❌ Không thể khởi tạo log file: {e}")
+            st.error(f"[FAIL] Không thể khởi tạo log file: {e}")
             return pd.DataFrame()
 
         st.info(
@@ -72,10 +72,10 @@ def load_data():
         # Debug info
         file_mtime = os.path.getmtime(LOG_FILE) if os.path.exists(LOG_FILE) else 0
         file_size = os.path.getsize(LOG_FILE) if os.path.exists(LOG_FILE) else 0
-        st.sidebar.text(f"📁 File: {os.path.basename(LOG_FILE)}")
-        st.sidebar.text(f"📊 Total rows: {len(df)}")
-        st.sidebar.text(f"🕒 Modified: {datetime.fromtimestamp(file_mtime).strftime('%H:%M:%S') if file_mtime > 0 else 'N/A'}")
-        st.sidebar.text(f"📦 Size: {file_size:,} bytes")
+        st.sidebar.text(f" File: {os.path.basename(LOG_FILE)}")
+        st.sidebar.text(f"[DATA] Total rows: {len(df)}")
+        st.sidebar.text(f" Modified: {datetime.fromtimestamp(file_mtime).strftime('%H:%M:%S') if file_mtime > 0 else 'N/A'}")
+        st.sidebar.text(f" Size: {file_size:,} bytes")
 
         if not df.empty:
             # Parse timestamp với format ISO8601 (hỗ trợ nhiều format)
@@ -94,18 +94,18 @@ def load_data():
             
             # Debug: show actions and risk scores
             if "action" in df.columns:
-                st.sidebar.text(f"🔍 Actions: {df['action'].value_counts().to_dict()}")
+                st.sidebar.text(f" Actions: {df['action'].value_counts().to_dict()}")
             if "risk_score" in df.columns:
-                st.sidebar.text(f"📈 Risk range: {df['risk_score'].min()}-{df['risk_score'].max()}")
+                st.sidebar.text(f" Risk range: {df['risk_score'].min()}-{df['risk_score'].max()}")
 
         return df
 
     except json.JSONDecodeError as e:
-        st.error(f"❌ JSON decode error: {e}")
+        st.error(f"[FAIL] JSON decode error: {e}")
         st.error(f"File: {LOG_FILE}")
         return pd.DataFrame()
     except Exception as e:
-        st.error(f"❌ Lỗi đọc log: {e}")
+        st.error(f"[FAIL] Lỗi đọc log: {e}")
         import traceback
         st.error(f"Traceback: {traceback.format_exc()}")
         return pd.DataFrame()
@@ -127,7 +127,7 @@ def classify_severity(score):
     return "Critical"
 
 # ================= UI =================
-st.markdown('<div class="main-title">🛡️ HYBRID DLP - SECURITY CENTER</div>', unsafe_allow_html=True)
+st.markdown('<div class="main-title">[SEC] HYBRID DLP - SECURITY CENTER</div>', unsafe_allow_html=True)
 st.divider()
 
 df = load_data()
@@ -179,7 +179,7 @@ if not df.empty and {"timestamp", "risk_score", "file_name", "action"}.issubset(
             name = str(latest.get("file_name", "Unknown"))
             action = str(latest.get("action", "alerted")).upper()
             msg = f"{action} | {name} | Score {score:.1f}/10"
-            st.toast(f"🚨 {msg}", icon="🚨")
+            st.toast(f"[ALERT] {msg}", icon="[ALERT]")
             notify_browser("HybridDLP Alert", msg)
             st.session_state["last_notified_alert_key"] = latest_key
             st.session_state["last_seen_alert_ts"] = latest["timestamp"]
@@ -194,13 +194,13 @@ if not df.empty and {"timestamp", "risk_score", "file_name", "action"}.issubset(
                     name = str(row.get("file_name", "Unknown"))
                     action = str(row.get("action", "alerted")).upper()
                     msg = f"{action} | {name} | Score {score:.1f}/10"
-                    st.toast(f"🚨 {msg}", icon="🚨")
+                    st.toast(f"[ALERT] {msg}", icon="[ALERT]")
                     notify_browser("HybridDLP Alert", msg)
                     st.session_state["last_notified_alert_key"] = row_key
                 st.session_state["last_seen_alert_ts"] = new_alerts["timestamp"].max()
 
 # ================= SIDEBAR =================
-st.sidebar.header("🔍 Bộ lọc")
+st.sidebar.header(" Bộ lọc")
 
 risk_range = st.sidebar.slider("Risk Score", 0.0, 10.0, (0.0, 10.0))
 
@@ -230,10 +230,10 @@ if df.empty:
 # ================= KPI =================
 col1, col2, col3, col4 = st.columns(4)
 
-col1.metric("📊 TỔNG SỰ KIỆN", len(df))
-col2.metric("✅ LOW", len(df[df["severity"] == "Low"]))
-col3.metric("🔥 HIGH+", len(df[df["severity"].isin(["High", "Critical"])]))
-col4.metric("🕒 UPDATE", datetime.now().strftime("%H:%M:%S"))
+col1.metric("[DATA] TỔNG SỰ KIỆN", len(df))
+col2.metric("[OK] LOW", len(df[df["severity"] == "Low"]))
+col3.metric("[!] HIGH+", len(df[df["severity"].isin(["High", "Critical"])]))
+col4.metric(" UPDATE", datetime.now().strftime("%H:%M:%S"))
 
 st.divider()
 
@@ -242,7 +242,7 @@ chart1, chart2, chart3 = st.columns(3)
 
 # ---- TREND ----
 with chart1:
-    st.subheader("📈 Trend")
+    st.subheader(" Trend")
 
     df_chart = df.copy()
     # Ensure timestamp is datetime before using .dt accessor
@@ -261,7 +261,7 @@ with chart1:
 
 # ---- RISK PIE ----
 with chart2:
-    st.subheader("🍩 Risk Ratio")
+    st.subheader(" Risk Ratio")
 
     risk_data = df["severity"].value_counts().reset_index()
     risk_data.columns = ["Severity", "Count"]
@@ -276,7 +276,7 @@ with chart2:
 
 # ---- KEYWORD ----
 with chart3:
-    st.subheader("🔑 Top Keywords")
+    st.subheader(" Top Keywords")
 
     if "keywords" in df.columns:
         kw = df["keywords"].explode().value_counts().head(5).reset_index()
@@ -292,7 +292,7 @@ with chart3:
 st.divider()
 
 # ================= TABLE =================
-st.subheader("🚨 Alerts Log")
+st.subheader("[ALERT] Alerts Log")
 
 st.dataframe(df, width='stretch')
 

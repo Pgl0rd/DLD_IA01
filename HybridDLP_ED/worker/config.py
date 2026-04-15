@@ -169,7 +169,7 @@ class WorkerConfig:
         'anomaly': 0.25,
         'behavioral_deviation': 0.25,
         'content_sensitivity': 0.30,
-        'temporal': 0.10,
+        'temparol': 0.10,
         'frequency': 0.10
     }
     
@@ -231,14 +231,14 @@ class WorkerConfig:
     }
     CVSS_DLP_FUSION_WEIGHTS = {
         'base': _env_float('CVSS_DLP_F_BASE', 0.60),
-        'maturity': _env_float('CVSS_DLP_F_MATURITY', 0.25),
+        'temparol': _env_float('CVSS_DLP_F_TEMPAROL', 0.25),
         'environmental': _env_float('CVSS_DLP_F_ENV', 0.15),
     }
-    CVSS_DLP_MATURITY_LEVEL_SCORES = {
-        'U': _env_float('CVSS_DLP_MAT_U', 2.0),
-        'P': _env_float('CVSS_DLP_MAT_P', 5.0),
-        'A': _env_float('CVSS_DLP_MAT_A', 8.5),
-        'X': _env_float('CVSS_DLP_MAT_X', 3.5),
+    CVSS_DLP_TEMPAROL_LEVEL_SCORES = {
+        'U': _env_float('CVSS_DLP_TEMP_U', 2.0),
+        'P': _env_float('CVSS_DLP_TEMP_P', 5.0),
+        'A': _env_float('CVSS_DLP_TEMP_A', 8.5),
+        'X': _env_float('CVSS_DLP_TEMP_X', 3.5),
     }
     CVSS_DLP_EM_FACTORS = {
         'U': _env_float('CVSS_DLP_EMF_U', 0.85),

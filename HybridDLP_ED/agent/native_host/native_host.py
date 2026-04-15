@@ -195,10 +195,10 @@ def self_test() -> None:
     fwd = TCPForwarder(SENSOR_HOST, SENSOR_PORT)
     try:
         fwd.send(test_event)
-        print("[self_test] ✅ Event sent successfully!")
+        print("[self_test] [OK] Event sent successfully!")
         print(f"[self_test] Event: {json.dumps(test_event, indent=2)}")
     except OSError as exc:
-        print(f"[self_test] ❌ FAILED: {exc}")
+        print(f"[self_test] [FAIL] FAILED: {exc}")
         print(
             "[self_test] Make sure the sensor is running:\n"
             "  python -m sensor_system.runner --sensor browser_upload_sensor"

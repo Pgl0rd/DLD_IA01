@@ -22,7 +22,7 @@ def manual_sync():
     """Manually fetch and sync config từ server"""
     
     print("\n" + "=" * 70)
-    print("🔄 MANUAL CONFIG SYNC")
+    print(" MANUAL CONFIG SYNC")
     print("=" * 70)
     
     try:
@@ -52,7 +52,7 @@ def manual_sync():
                 )
             
             if resp.status_code == 200:
-                print(f"   ✓ Server responded: HTTP 200")
+                print(f"   [v] Server responded: HTTP 200")
                 
                 data = resp.json()
                 if data.get('status') == 'ok':
@@ -74,44 +74,44 @@ def manual_sync():
                     with open(local_path, 'w', encoding='utf-8') as f:
                         json.dump(config, f, indent=2, ensure_ascii=False)
                     
-                    print(f"   ✓ Saved: {local_path}")
+                    print(f"   [v] Saved: {local_path}")
                     print(f"   Size: {local_path.stat().st_size} bytes")
                     
                     # Trigger callback if config_sync is running
                     print(f"\n5️⃣  Checking for ConfigSync instance...")
                     sync = get_config_sync()
                     if sync and sync._running:
-                        print(f"   ✓ ConfigSync is running")
+                        print(f"   [v] ConfigSync is running")
                         print(f"   Triggering on_config_updated callback...")
                         if sync._on_config_updated:
                             sync._on_config_updated(config)
-                            print(f"   ✓ Callback executed")
+                            print(f"   [v] Callback executed")
                     else:
                         print(f"   ⚠ ConfigSync not running (will run on next boot)")
                     
-                    print(f"\n✅ SYNC SUCCESSFUL!")
+                    print(f"\n[OK] SYNC SUCCESSFUL!")
                     print(f"\nℹ️  Local cache updated. Next time /endpoint starts,")
                     print(f"    behavioral rules will use this config.")
                     
                     return True
                 else:
-                    print(f"❌ Server error: {data.get('message')}")
+                    print(f"[FAIL] Server error: {data.get('message')}")
                     return False
             else:
-                print(f"❌ HTTP Error: {resp.status_code}")
+                print(f"[FAIL] HTTP Error: {resp.status_code}")
                 print(f"   {resp.text[:200]}")
                 return False
                 
         except httpx.TimeoutException:
-            print(f"❌ Connection timeout - server may be unreachable")
+            print(f"[FAIL] Connection timeout - server may be unreachable")
             print(f"   Check if server is running at: {server_url}")
             return False
         except Exception as e:
-            print(f"❌ Connection error: {e}")
+            print(f"[FAIL] Connection error: {e}")
             return False
             
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"[FAIL] ERROR: {e}")
         import traceback
         traceback.print_exc()
         return False

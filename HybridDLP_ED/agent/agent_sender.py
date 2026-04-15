@@ -191,7 +191,7 @@ if __name__ == "__main__":
             )
             resp.raise_for_status()
             ok += len(batch)
-            print(f"  [{ok}/{len(events)}] ✓")
+            print(f"  [{ok}/{len(events)}] [v]")
         except Exception as e:
             print(f"  Lỗi batch {i}: {e}")
 

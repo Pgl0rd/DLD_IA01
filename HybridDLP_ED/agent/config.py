@@ -42,7 +42,7 @@ class Config:
                 with open(CONFIG_FILE, "r", encoding="utf-8") as f:
                     self._config = json.load(f)
             except Exception as e:
-                print(f"⚠️  Lỗi đọc config: {e}, sử dụng mặc định")
+                print(f"[WARN]  Lỗi đọc config: {e}, sử dụng mặc định")
                 self._config = self._get_defaults()
         else:
             self._config = self._get_defaults()
@@ -62,7 +62,7 @@ class Config:
             with open(CONFIG_FILE, "w", encoding="utf-8") as f:
                 json.dump(self._config, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            print(f"❌ Lỗi ghi config: {e}")
+            print(f"[FAIL] Lỗi ghi config: {e}")
     
     def get(self, key: str, default=None):
         """Lấy giá trị từ config."""

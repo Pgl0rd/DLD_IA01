@@ -3,9 +3,9 @@
 
 set -e
 
-echo "🛑 Stopping HybridDLP Docker Services..."
+echo " Stopping HybridDLP Docker Services..."
 
 # Stop services
 docker-compose down
 
-echo "✅ All services stopped"
+echo "[OK] All services stopped"

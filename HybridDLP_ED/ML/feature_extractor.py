@@ -18,7 +18,7 @@ class EventFeatureExtractor:
     Extract numerical features from events for ML models
     
     Features theo ML_DEVELOPMENT_PLAN.md:
-    1. Temporal Features: is_off_hours, is_weekend, hour_of_day, day_of_week
+    1. Temparol Features: is_off_hours, is_weekend, hour_of_day, day_of_week
     2. Frequency/Velocity Features: clipboard_pastes_last_10m, bytes_transferred_usb_last_1h, file_operations_last_1h
     3. Quantitative Features: entropy_value, content_size, file_count
     4. Contextual/Categorical Features: dest_app_category, source_type, operation_type
@@ -33,7 +33,7 @@ class EventFeatureExtractor:
         """
         self.event_history = event_history or []
         self.feature_names = [
-            # Temporal (4)
+            # Temparol (4)
             'is_off_hours', 'is_weekend', 'hour_of_day', 'day_of_week',
             # Frequency (3)
             'clipboard_pastes_last_10m', 'bytes_transferred_usb_last_1h', 'file_operations_last_1h',
@@ -62,7 +62,7 @@ class EventFeatureExtractor:
         """
         features = []
         
-        # 1. Temporal Features
+        # 1. Temparol Features
         ts_str = event.get('ts') or event.get('timestamp', '')
         dt = self._parse_timestamp(ts_str)
         

@@ -25,7 +25,7 @@ from agent.config_sync_init import initialize_config_sync
 def main():
     """Main entry point."""
     print("\n" + "=" * 60)
-    print("  🚀 HybridDLP - Startup")
+    print("  [START] HybridDLP - Startup")
     print("=" * 60 + "\n")
     
     # Check lần đầu setup
@@ -35,12 +35,12 @@ def main():
         
         try:
             if not run_setup_wizard():
-                print("\n❌ Setup was canceled")
+                print("\n[FAIL] Setup was canceled")
                 sys.exit(1)
             
-            print("\n✅ Setup completed successfully!")
+            print("\n[OK] Setup completed successfully!")
         except Exception as e:
-            print(f"\n❌ Setup error: {e}")
+            print(f"\n[FAIL] Setup error: {e}")
             import traceback
             traceback.print_exc()
             sys.exit(1)
@@ -60,19 +60,19 @@ def main():
         
         config_sync = initialize_config_sync()
         if config_sync:
-            print("✅ Config Sync initialized and running")
+            print("[OK] Config Sync initialized and running")
             print("   ℹ️  First sync will happen in 30 seconds")
             print("   ℹ️  Check agent/runtime/rules_config.json for config cache")
         else:
-            print("⚠️  Config Sync not available (will use local config)")
+            print("[WARN]  Config Sync not available (will use local config)")
             print("   ℹ️  Local config: agent/worker/core/rules_config.json")
     except Exception as e:
-        print(f"⚠️  Config Sync initialization failed: {e}")
+        print(f"[WARN]  Config Sync initialization failed: {e}")
         import traceback
         traceback.print_exc()
         print("   ℹ️  Continuing with local config...")
     
-    print("\n[Boot] 💡 To test config sync, run: python diagnose_config_sync.py")
+    print("\n[Boot] [TIP] To test config sync, run: python diagnose_config_sync.py")
     
     # Run system tray
     print("\n[Boot] Starting System Tray Application...")
@@ -81,7 +81,7 @@ def main():
         tray_app = show_system_tray()
         
         if tray_app:
-            print("✅ System Tray running")
+            print("[OK] System Tray running")
             print("\nℹ️  Click the DLP icon in system tray to:")
             print("   - Access Control Center (yêu cầu password)")
             print("   - Start/Stop Sensor")
@@ -96,10 +96,10 @@ def main():
                 tray_app.stop()
                 sys.exit(0)
         else:
-            print("❌ Failed to start System Tray")
+            print("[FAIL] Failed to start System Tray")
             sys.exit(1)
     except Exception as e:
-        print(f"❌ Error: {e}")
+        print(f"[FAIL] Error: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)

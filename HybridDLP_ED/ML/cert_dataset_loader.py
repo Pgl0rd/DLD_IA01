@@ -86,7 +86,7 @@ class CERTDatasetLoader:
                     event = self._convert_cert_file_event(row)
                     if event:
                         events.append(event)
-                logger.info(f"✅ Converted {len([e for e in events if e.get('source') == 'cert_dataset' and 'file' in str(e.get('type', '')).lower()]):,} file events")
+                logger.info(f"[OK] Converted {len([e for e in events if e.get('source') == 'cert_dataset' and 'file' in str(e.get('type', '')).lower()]):,} file events")
             except Exception as e:
                 logger.error(f"Error loading CERT file.csv: {e}")
         
@@ -116,7 +116,7 @@ class CERTDatasetLoader:
                     if event:
                         events.append(event)
                         email_count += 1
-                logger.info(f"✅ Converted {email_count:,} email events")
+                logger.info(f"[OK] Converted {email_count:,} email events")
             except Exception as e:
                 logger.error(f"Error loading CERT email.csv: {e}")
         
@@ -146,7 +146,7 @@ class CERTDatasetLoader:
                     if event:
                         events.append(event)
                         http_count += 1
-                logger.info(f"✅ Converted {http_count:,} HTTP events")
+                logger.info(f"[OK] Converted {http_count:,} HTTP events")
             except Exception as e:
                 logger.error(f"Error loading CERT http.csv: {e}")
         
@@ -189,7 +189,7 @@ class CERTDatasetLoader:
                 count += 1
                 if count % 50000 == 0:
                     logger.info(f"  Streamed {count:,} file events...")
-            logger.info(f"✅ Streamed {count:,} file events")
+            logger.info(f"[OK] Streamed {count:,} file events")
         
         # Stream email events
         if email_file:
@@ -200,7 +200,7 @@ class CERTDatasetLoader:
                 count += 1
                 if count % 50000 == 0:
                     logger.info(f"  Streamed {count:,} email events...")
-            logger.info(f"✅ Streamed {count:,} email events")
+            logger.info(f"[OK] Streamed {count:,} email events")
         
         # Stream HTTP events
         if http_file:
@@ -211,7 +211,7 @@ class CERTDatasetLoader:
                 count += 1
                 if count % 50000 == 0:
                     logger.info(f"  Streamed {count:,} HTTP events...")
-            logger.info(f"✅ Streamed {count:,} HTTP events")
+            logger.info(f"[OK] Streamed {count:,} HTTP events")
     
     def _stream_csv_events(
         self, 

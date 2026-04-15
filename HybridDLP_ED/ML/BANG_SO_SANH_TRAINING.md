@@ -1,6 +1,6 @@
 # Bảng So Sánh Các Script Training
 
-## 📊 Tổng Quan
+## [CHART] Tổng Quan
 
 | Script | Max Events/File | Sample Ratio | Tổng Events (ước tính) | RAM Usage | Thời gian |
 |--------|----------------|--------------|------------------------|-----------|-----------|
@@ -8,7 +8,7 @@
 | `train_simple.bat` | **KHÔNG GIỚI HẠN** | Không | **TOÀN BỘ CERT** (có thể 120M+) | 50-100GB+ | 10+ giờ |
 | `train_large_dataset.bat` | **1,000,000** | **1%** | ~1.2M (1% của 117M) | 2-4GB | 10-20 phút |
 
-## 🔍 Chi Tiết Từng Script
+## [SEARCH] Chi Tiết Từng Script
 
 ### 1. `train.bat` (Script Mặc Định)
 
@@ -22,13 +22,13 @@
 ```
 
 **Max rows:**
-- ❌ **KHÔNG GIỚI HẠN** - Load TOÀN BỘ dataset
+- [FAIL] **KHÔNG GIỚI HẠN** - Load TOÀN BỘ dataset
 - Email.csv: **117,000,000 rows** (toàn bộ)
 - File.csv: **TOÀN BỘ**
 - HTTP.csv: **TOÀN BỘ**
 - Synthetic: **10,050 events**
 
-**⚠️ Cảnh báo:**
+**[WARN] Cảnh báo:**
 - Với 117M rows email.csv → Cần ~50-100GB RAM
 - Có thể crash hệ thống nếu không đủ RAM
 - Training time: 10+ giờ
@@ -48,13 +48,13 @@
 ```
 
 **Max rows:**
-- ❌ **KHÔNG GIỚI HẠN** - Load TOÀN BỘ CERT dataset
+- [FAIL] **KHÔNG GIỚI HẠN** - Load TOÀN BỘ CERT dataset
 - Email.csv: **117,000,000 rows** (toàn bộ)
 - File.csv: **TOÀN BỘ**
 - HTTP.csv: **TOÀN BỘ**
 - Synthetic: **KHÔNG DÙNG**
 
-**⚠️ Cảnh báo:**
+**[WARN] Cảnh báo:**
 - Tương tự `train.bat` - cần RAM rất lớn
 
 ---
@@ -73,8 +73,8 @@
 ```
 
 **Max rows:**
-- ✅ **1,000,000 events/file** (giới hạn)
-- ✅ **Sample 1%** (random sampling)
+- [OK] **1,000,000 events/file** (giới hạn)
+- [OK] **Sample 1%** (random sampling)
 - Email.csv: 117M rows → **~1,170,000 events** (1% của 117M)
 - File.csv: **1,000,000 events** (hoặc toàn bộ nếu < 1M)
 - HTTP.csv: **1,000,000 events** (hoặc toàn bộ nếu < 1M)
@@ -83,7 +83,7 @@
 **Tổng ước tính:**
 - **~2-3 triệu events** (đủ để train model tốt)
 
-**✅ Ưu điểm:**
+**[OK] Ưu điểm:**
 - RAM: Chỉ cần 2-4GB
 - Time: 10-20 phút
 - Chất lượng: Đủ tốt (Isolation Forest không cần toàn bộ data)
@@ -95,11 +95,11 @@
 
 ---
 
-## 🎯 Khuyến Nghị
+## [TARGET] Khuyến Nghị
 
 ### Cho Dataset 117M Rows:
 
-**✅ Dùng `train_large_dataset.bat`** vì:
+**[OK] Dùng `train_large_dataset.bat`** vì:
 1. Sample 1% = ~1.17M events từ email.csv (đủ để train)
 2. Limit 1M/file → Tránh hết RAM
 3. Nhanh (10-20 phút)
@@ -115,7 +115,7 @@ Có thể tăng sample ratio:
 
 ---
 
-## 📝 Cách Tùy Chỉnh
+## [DOC] Cách Tùy Chỉnh
 
 ### Option 1: Tăng Sample Ratio (Chất lượng tốt hơn)
 ```bash
@@ -146,8 +146,8 @@ python -m ML.train_ueba \
 
 | Script | Max Rows | Khuyến Nghị |
 |--------|----------|-------------|
-| `train.bat` | **TOÀN BỘ** (117M+) | ❌ Không (quá lớn) |
-| `train_simple.bat` | **TOÀN BỘ** (117M+) | ❌ Không (quá lớn) |
-| `train_large_dataset.bat` | **1M/file + 1% sample** | ✅ **CÓ** (tối ưu) |
+| `train.bat` | **TOÀN BỘ** (117M+) | [FAIL] Không (quá lớn) |
+| `train_simple.bat` | **TOÀN BỘ** (117M+) | [FAIL] Không (quá lớn) |
+| `train_large_dataset.bat` | **1M/file + 1% sample** | [OK] **CÓ** (tối ưu) |
 
 **Kết luận:** Với dataset 117M rows, dùng `train_large_dataset.bat` để có **~1-2M events** (đủ để train model tốt mà không hết RAM).

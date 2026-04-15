@@ -1,10 +1,10 @@
 # Detection Engine (L3) - Worker Process
 
-## 📋 Tổng quan
+##  Tổng quan
 
 **Detection Engine (L3)** là Worker Process chịu trách nhiệm phân tích và phát hiện dữ liệu nhạy cảm từ events được tạo bởi Agent (L1).
 
-## 🏗️ Kiến trúc
+## ️ Kiến trúc
 
 ```
 Agent (L1) → IPC Queue (SQLite/Redis) → Detection Engine (L3)
@@ -17,7 +17,7 @@ Agent (L1) → IPC Queue (SQLite/Redis) → Detection Engine (L3)
                                     5. Action Executor
 ```
 
-## 📁 Cấu trúc
+##  Cấu trúc
 
 ```
 worker/
@@ -53,7 +53,7 @@ worker/
     └── detection_engine.log
 ```
 
-## 🚀 Cài đặt
+## [START] Cài đặt
 
 ### 1. Install dependencies
 
@@ -81,7 +81,7 @@ apt-get install -y yara libyara-dev tesseract-ocr tesseract-ocr-vie libmagic1
 mkdir -p yara_rules ml_models database logs
 ```
 
-## ⚙️ Cấu hình
+## [SETTING] Cấu hình
 
 ### Environment Variables
 
@@ -111,13 +111,13 @@ Các tham số có thể điều chỉnh:
 - `OCR_MAX_CPU_PERCENT`: CPU usage tối đa cho OCR (default: 70%)
 - `RISK_THRESHOLDS`: Ngưỡng risk score cho block/alert/log
 - `RISK_WEIGHTS`: Trọng số cho content/behavior/context scores (phương pháp `traditional`)
-- `RISK_SCORING_METHOD`: mặc định `cvss_dlp` (Base + Exfiltration Maturity + Environmental + fusion); có thể `nist_based` | `traditional` | `research_based`
+- `RISK_SCORING_METHOD`: mặc định `cvss_dlp` (Base + Exfiltration Temparol + Environmental + fusion); có thể `nist_based` | `traditional` | `research_based`
 - `ML_ANOMALY_BEHAVIOR_BLEND`: Hệ số gộp điểm anomaly UEBA (0–100) vào Behavior score (traditional)
 - `RISK_LEVEL_LOW_MAX`, `RISK_LEVEL_MEDIUM_MAX`, `RISK_LEVEL_HIGH_MAX`: Ranh giới phân loại low/medium/high/critical
 
 Tài liệu công thức đầy đủ (NIST, trọng số, Isolation Forest, sơ đồ): `../docs/PHUONG_PHAP_RISK_SCORE_VA_NGUONG.md`
 
-## 🎯 Sử dụng
+## [TARGET] Sử dụng
 
 ### Chạy Worker
 
@@ -154,7 +154,7 @@ DEMO_OFF_HOURS_ISO=2026-04-08T21:30:00+07:00
 
 Worker có thể được spawn bởi Agent Service hoặc chạy độc lập.
 
-## 📊 Pipeline xử lý
+## [CHART] Pipeline xử lý
 
 1. **Queue Consumer**: Đọc events từ SQLite/Redis
 2. **Panic Mode Check**: Kiểm tra queue size, kích hoạt panic mode nếu cần
@@ -164,11 +164,11 @@ Worker có thể được spawn bởi Agent Service hoặc chạy độc lập.
 6. **Deep Analysis** (nếu cần):
    - OCR (với điều kiện: size < 5MB, CPU < 70%, là ảnh)
    - ML Classification (lazy load)
-7. **Risk Scoring**: Theo `RISK_SCORING_METHOD` — mặc định **cvss_dlp** (CVSS-inspired: base, maturity U/P/A/X, environmental, attack chain, fusion); hoặc NIST (L×I), traditional, research-based; kết quả có `risk_level` (low/medium/high/critical)
+7. **Risk Scoring**: Theo `RISK_SCORING_METHOD` — mặc định **cvss_dlp** (CVSS-inspired: base, temparol U/P/A/X, environmental, attack chain, fusion); hoặc NIST (L×I), traditional, research-based; kết quả có `risk_level` (low/medium/high/critical)
 8. **Action Executor**: Thực thi Block/Alert/Log
 9. **Update Cache**: Lưu kết quả vào cache
 
-## 🔍 YARA Rules
+## [SEARCH] YARA Rules
 
 YARA rules được đặt trong `yara_rules/`:
 - `vietnam_id.yar`: Phát hiện CMND/CCCD
@@ -176,7 +176,7 @@ YARA rules được đặt trong `yara_rules/`:
 - `email.yar`: Phát hiện email lists
 - `api_key.yar`: Phát hiện API keys và secrets
 
-## 🤖 ML Models
+##  ML Models
 
 ML models cần được train trước khi sử dụng:
 - `classifier.pkl`: Trained classifier (Random Forest/SVM)
@@ -184,13 +184,13 @@ ML models cần được train trước khi sử dụng:
 
 Xem `scripts/train_model.py` để train models.
 
-## 📝 Logs
+## [DOC] Logs
 
 Logs được lưu tại:
 - `logs/detection_engine.log`: File log chính
 - Console output: Real-time logs
 
-## 🔧 Troubleshooting
+##  Troubleshooting
 
 ### YARA không load rules
 
@@ -220,7 +220,7 @@ tesseract --list-langs  # Should show: eng, vie
 - Kiểm tra `EVENTS_DB_PATH` trỏ đúng đến SQLite database từ agent
 - Hoặc kiểm tra Redis connection nếu dùng Redis
 
-## 📚 Tài liệu tham khảo
+##  Tài liệu tham khảo
 
 - [HUONG_DAN_DETECTION_ENGINE.md](../../../HUONG_DAN_DETECTION_ENGINE.md)
 - [PHAN_TICH_KIEN_TRUC.md](../../../PHAN_TICH_KIEN_TRUC.md)

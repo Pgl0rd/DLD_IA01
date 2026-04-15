@@ -24,13 +24,13 @@ def reset_password():
     try:
         if PASSWORD_FILE.exists():
             PASSWORD_FILE.unlink()
-            print(f"✅ Password reset: {PASSWORD_FILE} deleted")
+            print(f"[OK] Password reset: {PASSWORD_FILE} deleted")
             return True
         else:
             print(f"ℹ️  Password file not found: {PASSWORD_FILE}")
             return True
     except Exception as e:
-        print(f"❌ Error resetting password: {e}")
+        print(f"[FAIL] Error resetting password: {e}")
         return False
 
 
@@ -41,13 +41,13 @@ def reset_config():
     try:
         if CONFIG_FILE.exists():
             CONFIG_FILE.unlink()
-            print(f"✅ Config reset: {CONFIG_FILE} deleted")
+            print(f"[OK] Config reset: {CONFIG_FILE} deleted")
             return True
         else:
             print(f"ℹ️  Config file not found: {CONFIG_FILE}")
             return True
     except Exception as e:
-        print(f"❌ Error resetting config: {e}")
+        print(f"[FAIL] Error resetting config: {e}")
         return False
 
 
@@ -58,13 +58,13 @@ def reset_all():
     try:
         if CONFIG_DIR.exists():
             shutil.rmtree(CONFIG_DIR)
-            print(f"✅ Full reset: Deleted {CONFIG_DIR}")
+            print(f"[OK] Full reset: Deleted {CONFIG_DIR}")
             return True
         else:
             print(f"ℹ️  Config folder not found: {CONFIG_DIR}")
             return True
     except Exception as e:
-        print(f"❌ Error resetting: {e}")
+        print(f"[FAIL] Error resetting: {e}")
         return False
 
 
@@ -72,11 +72,11 @@ def show_password_file():
     """Show password file location and content."""
     from agent.password_manager import PASSWORD_FILE
     
-    print(f"\n📁 Password File Location:")
+    print(f"\n Password File Location:")
     print(f"   {PASSWORD_FILE}")
     
     if PASSWORD_FILE.exists():
-        print(f"\n   Status: ✅ EXISTS (password is set)")
+        print(f"\n   Status: [OK] EXISTS (password is set)")
         print(f"   Size: {PASSWORD_FILE.stat().st_size} bytes")
         try:
             with open(PASSWORD_FILE, 'r') as f:
@@ -85,18 +85,18 @@ def show_password_file():
         except:
             print(f"   Content: [unreadable]")
     else:
-        print(f"\n   Status: ❌ NOT FOUND (password not set)")
+        print(f"\n   Status: [FAIL] NOT FOUND (password not set)")
 
 
 def show_config_file():
     """Show config file location and content."""
     from agent.config import CONFIG_FILE
     
-    print(f"\n📁 Config File Location:")
+    print(f"\n Config File Location:")
     print(f"   {CONFIG_FILE}")
     
     if CONFIG_FILE.exists():
-        print(f"\n   Status: ✅ EXISTS (config is set)")
+        print(f"\n   Status: [OK] EXISTS (config is set)")
         try:
             import json
             with open(CONFIG_FILE, 'r') as f:
@@ -106,7 +106,7 @@ def show_config_file():
         except Exception as e:
             print(f"   Error reading config: {e}")
     else:
-        print(f"\n   Status: ❌ NOT FOUND (config not set)")
+        print(f"\n   Status: [FAIL] NOT FOUND (config not set)")
 
 
 def main():
@@ -170,7 +170,7 @@ Examples:
         args.status = True
     
     if args.status:
-        print("\n📋 Current Setup Status:")
+        print("\n Current Setup Status:")
         show_password_file()
         show_config_file()
     
@@ -181,32 +181,32 @@ Examples:
         show_config_file()
     
     if args.reset_password:
-        print("\n⚠️  Resetting password...")
+        print("\n[WARN]  Resetting password...")
         if reset_password():
-            print("\n💡 Next run: Setup wizard will ask for new password")
+            print("\n[TIP] Next run: Setup wizard will ask for new password")
         sys.exit(0 if reset_password() else 1)
     
     if args.reset_config:
-        print("\n⚠️  Resetting config...")
+        print("\n[WARN]  Resetting config...")
         if reset_config():
-            print("\n💡 Next run: Setup wizard will ask for server details")
+            print("\n[TIP] Next run: Setup wizard will ask for server details")
         sys.exit(0 if reset_config() else 1)
     
     if args.reset_all:
-        print("\n⚠️  FULL RESET - This will delete all configuration!")
+        print("\n[WARN]  FULL RESET - This will delete all configuration!")
         response = input("   Type 'YES' to confirm: ").strip()
         
         if response == "YES":
-            print("\n🗑️  Deleting all configuration files...")
+            print("\n️  Deleting all configuration files...")
             if reset_all():
-                print("\n✅ Full reset successful!")
-                print("\n💡 Next run: Setup wizard will start from scratch")
+                print("\n[OK] Full reset successful!")
+                print("\n[TIP] Next run: Setup wizard will start from scratch")
                 sys.exit(0)
             else:
-                print("\n❌ Reset failed")
+                print("\n[FAIL] Reset failed")
                 sys.exit(1)
         else:
-            print("\n❌ Reset cancelled")
+            print("\n[FAIL] Reset cancelled")
             sys.exit(1)
     
     print()

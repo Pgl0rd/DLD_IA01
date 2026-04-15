@@ -66,7 +66,7 @@ def load_jsonl_events_streaming(jsonl_path: Path, limit: Optional[int] = None, s
             except json.JSONDecodeError:
                 continue
     
-    logger.info(f"✅ Streamed {loaded:,} events from {jsonl_path}")
+    logger.info(f"[OK] Streamed {loaded:,} events from {jsonl_path}")
 
 
 def load_jsonl_events(jsonl_path: Path, limit: Optional[int] = None) -> List[Dict[str, Any]]:
@@ -100,7 +100,7 @@ def load_jsonl_events(jsonl_path: Path, limit: Optional[int] = None) -> List[Dic
             if (i + 1) % 100000 == 0:
                 logger.info(f"  Read {i + 1:,} lines, loaded {len(events):,} events...")
     
-    logger.info(f"✅ Loaded {len(events):,} events from {jsonl_path} (total lines: {line_count:,})")
+    logger.info(f"[OK] Loaded {len(events):,} events from {jsonl_path} (total lines: {line_count:,})")
     return events
 
 
@@ -155,9 +155,9 @@ def train_ueba_model(
         logger.info(f"Processing CERT dataset from: {cert_path.absolute()}")
         
         if max_events_per_file:
-            logger.info(f"⚠️  Using limit: {max_events_per_file:,} events per file (to save memory)")
+            logger.info(f"[WARN]  Using limit: {max_events_per_file:,} events per file (to save memory)")
         else:
-            logger.info("⚠️  Processing TOÀN BỘ CERT dataset (may use a lot of memory)")
+            logger.info("[WARN]  Processing TOÀN BỘ CERT dataset (may use a lot of memory)")
         
         cert_loader = CERTDatasetLoader(cert_path)
         
@@ -189,7 +189,7 @@ def train_ueba_model(
                 logger.debug(f"Error extracting features: {e}")
                 continue
         
-        logger.info(f"✅ Processed {cert_count:,} CERT events")
+        logger.info(f"[OK] Processed {cert_count:,} CERT events")
     
     # 2. Process synthetic data in chunks
     if synthetic_data_path and Path(synthetic_data_path).exists():
@@ -214,7 +214,7 @@ def train_ueba_model(
                 logger.debug(f"Error extracting features: {e}")
                 continue
         
-        logger.info(f"✅ Processed {synthetic_count:,} synthetic events")
+        logger.info(f"[OK] Processed {synthetic_count:,} synthetic events")
     
     # 3. Process agent events in chunks
     if agent_events_path and Path(agent_events_path).exists():
@@ -236,13 +236,13 @@ def train_ueba_model(
                 logger.debug(f"Error extracting features: {e}")
                 continue
         
-        logger.info(f"✅ Processed {agent_count:,} agent events")
+        logger.info(f"[OK] Processed {agent_count:,} agent events")
     
     if len(features_list) == 0:
         logger.error("No features extracted! Please check data sources.")
         return
     
-    logger.info(f"✅ Total features extracted: {len(features_list):,} from {total_processed:,} events")
+    logger.info(f"[OK] Total features extracted: {len(features_list):,} from {total_processed:,} events")
     
     if len(features_list) == 0:
         logger.error("No features extracted! Check event format.")

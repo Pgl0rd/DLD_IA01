@@ -16,7 +16,7 @@ if str(_AGENT_PATH) not in sys.path:
 def check_config():
     """Kiểm tra config cơ bản"""
     print("\n" + "=" * 70)
-    print("🔍 STEP 1: Check Config File")
+    print(" STEP 1: Check Config File")
     print("=" * 70)
     
     try:
@@ -26,17 +26,17 @@ def check_config():
         server_url = cfg.get_server_url()
         api_key = cfg.get_api_key()
         
-        print(f"✓ Config loaded from: {_AGENT_PATH / 'runtime' / 'config' / 'config.json'}")
+        print(f"[v] Config loaded from: {_AGENT_PATH / 'runtime' / 'config' / 'config.json'}")
         print(f"  Server URL: {server_url}")
         print(f"  API Key: {api_key[:20]}...")
         
         if not server_url or not api_key:
-            print("❌ ERROR: Server URL or API Key is empty!")
+            print("[FAIL] ERROR: Server URL or API Key is empty!")
             return False
         
         return True
     except Exception as e:
-        print(f"❌ ERROR loading config: {e}")
+        print(f"[FAIL] ERROR loading config: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -45,7 +45,7 @@ def check_config():
 def check_server_connectivity():
     """Kiểm tra kết nối tới server"""
     print("\n" + "=" * 70)
-    print("🔍 STEP 2: Check Server Connectivity")
+    print(" STEP 2: Check Server Connectivity")
     print("=" * 70)
     
     try:
@@ -69,12 +69,12 @@ def check_server_connectivity():
                 )
             
             if resp.status_code == 200:
-                print(f"✓ Server is reachable (HTTP {resp.status_code})")
+                print(f"[v] Server is reachable (HTTP {resp.status_code})")
                 
                 data = resp.json()
                 if data.get('status') == 'ok':
                     config = data.get('config', {})
-                    print(f"✓ Config retrieved successfully")
+                    print(f"[v] Config retrieved successfully")
                     print(f"  Config size: {len(json.dumps(config))} bytes")
                     
                     # Show config stats
@@ -86,22 +86,22 @@ def check_server_connectivity():
                     
                     return True
                 else:
-                    print(f"❌ Server error: {data.get('message')}")
+                    print(f"[FAIL] Server error: {data.get('message')}")
                     return False
             else:
-                print(f"❌ Server returned HTTP {resp.status_code}")
+                print(f"[FAIL] Server returned HTTP {resp.status_code}")
                 print(f"Response: {resp.text[:200]}")
                 return False
                 
         except httpx.TimeoutException:
-            print(f"❌ Connection timeout - server may be down or IP unreachable")
+            print(f"[FAIL] Connection timeout - server may be down or IP unreachable")
             return False
         except Exception as e:
-            print(f"❌ Connection error: {e}")
+            print(f"[FAIL] Connection error: {e}")
             return False
             
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"[FAIL] ERROR: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -110,7 +110,7 @@ def check_server_connectivity():
 def check_local_config_path():
     """Kiểm tra đường dẫn local config"""
     print("\n" + "=" * 70)
-    print("🔍 STEP 3: Check Local Config Path")
+    print(" STEP 3: Check Local Config Path")
     print("=" * 70)
     
     try:
@@ -120,13 +120,13 @@ def check_local_config_path():
         
         if local_path.exists():
             size = local_path.stat().st_size
-            print(f"✓ File exists (Size: {size} bytes)")
+            print(f"[v] File exists (Size: {size} bytes)")
             
             # Try to parse it
             with open(local_path, 'r', encoding='utf-8') as f:
                 config = json.load(f)
             
-            print(f"✓ File is valid JSON")
+            print(f"[v] File is valid JSON")
             
             # Show content
             clipboard_rule = config.get('clipboard_paste_rule', {})
@@ -140,21 +140,21 @@ def check_local_config_path():
             
             # Check if directory exists
             local_path.parent.mkdir(parents=True, exist_ok=True)
-            print(f"✓ Directory created: {local_path.parent}")
+            print(f"[v] Directory created: {local_path.parent}")
             return True
             
     except json.JSONDecodeError as e:
-        print(f"❌ JSON Parse Error: {e}")
+        print(f"[FAIL] JSON Parse Error: {e}")
         return False
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"[FAIL] ERROR: {e}")
         return False
 
 
 def check_config_sync_status():
     """Kiểm tra config_sync có đang chạy không"""
     print("\n" + "=" * 70)
-    print("🔍 STEP 4: Check Config Sync Status")
+    print(" STEP 4: Check Config Sync Status")
     print("=" * 70)
     
     try:
@@ -163,14 +163,14 @@ def check_config_sync_status():
         sync = get_config_sync()
         
         if sync:
-            print(f"✓ Config Sync instance exists")
+            print(f"[v] Config Sync instance exists")
             print(f"  Running: {sync._running}")
             print(f"  Sync Interval: {sync.sync_interval} seconds")
             print(f"  Server URL: {sync.server_url}")
             print(f"  API Key: {sync.api_key[:20]}...")
             
             if sync._running:
-                print(f"✓ Config Sync is RUNNING")
+                print(f"[v] Config Sync is RUNNING")
                 return True
             else:
                 print(f"⚠ Config Sync is NOT running")
@@ -187,7 +187,7 @@ def check_config_sync_status():
 def check_behavioral_rules():
     """Kiểm tra behavioral rules có load config không"""
     print("\n" + "=" * 70)
-    print("🔍 STEP 5: Check Behavioral Rules Config")
+    print(" STEP 5: Check Behavioral Rules Config")
     print("=" * 70)
     
     try:
@@ -196,26 +196,26 @@ def check_behavioral_rules():
         
         provider = get_config_provider()
         
-        print(f"✓ Config Provider initialized")
+        print(f"[v] Config Provider initialized")
         
         browser_apps = provider.get_browser_apps()
-        print(f"✓ Can access browser_apps: {len(browser_apps)} items")
+        print(f"[v] Can access browser_apps: {len(browser_apps)} items")
         
         domains = provider.get_sensitive_domains()
-        print(f"✓ Can access sensitive_domains: {len(domains)} items")
+        print(f"[v] Can access sensitive_domains: {len(domains)} items")
         
         keywords = provider.get_sensitive_title_keywords()
-        print(f"✓ Can access keywords: {len(keywords)} items")
+        print(f"[v] Can access keywords: {len(keywords)} items")
         
         if browser_apps and domains and keywords:
-            print(f"\n✅ All config sources available!")
+            print(f"\n[OK] All config sources available!")
             return True
         else:
             print(f"\n⚠ Some config sources empty")
             return False
             
     except Exception as e:
-        print(f"❌ ERROR: {e}")
+        print(f"[FAIL] ERROR: {e}")
         import traceback
         traceback.print_exc()
         return False
@@ -246,22 +246,22 @@ def run_all_diagnostics():
     
     # Summary
     print("\n" + "=" * 70)
-    print("📊 DIAGNOSTIC SUMMARY")
+    print("[DATA] DIAGNOSTIC SUMMARY")
     print("=" * 70)
     
     passed = sum(1 for _, result in results if result)
     total = len(results)
     
     for name, result in results:
-        status = "✅ PASS" if result else "❌ FAIL"
+        status = "[OK] PASS" if result else "[FAIL] FAIL"
         print(f"{status:8} - {name}")
     
     print(f"\nResult: {passed}/{total} checks passed")
     
     if passed == total:
-        print("\n🎉 Everything looks good!")
+        print("\n Everything looks good!")
     else:
-        print("\n⚠️  Some issues detected. Check the output above.")
+        print("\n[WARN]  Some issues detected. Check the output above.")
     
     print("=" * 70 + "\n")
     

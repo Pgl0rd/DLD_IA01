@@ -49,17 +49,17 @@ def test_server_connection(server_url: str, api_key: str, timeout: int = 5) -> T
         client.close()
         
         if resp.status_code == 200 or resp.status_code == 201:
-            return True, f"✅ Kết nối thành công! (Status: {resp.status_code})"
+            return True, f"[OK] Kết nối thành công! (Status: {resp.status_code})"
         else:
-            return False, f"❌ Server phản hồi lỗi (Status: {resp.status_code})"
+            return False, f"[FAIL] Server phản hồi lỗi (Status: {resp.status_code})"
     
     except httpx.ConnectError:
-        return False, "❌ Không thể kết nối tới server (Connection refused)"
+        return False, "[FAIL] Không thể kết nối tới server (Connection refused)"
     except httpx.TimeoutException:
-        return False, f"❌ Kết nối timeout (>{timeout}s)"
+        return False, f"[FAIL] Kết nối timeout (>{timeout}s)"
     except Exception as e:
         error_msg = str(e)[:100]
-        return False, f"❌ Lỗi: {error_msg}"
+        return False, f"[FAIL] Lỗi: {error_msg}"
 
 
 def test_server_connection_with_retry(

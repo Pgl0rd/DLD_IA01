@@ -18,7 +18,7 @@ python -m ML.generate_synthetic_data --output synthetic_events.jsonl --normal 10
 echo.
 echo === Training UEBA Model với CERT Dataset ===
 echo.
-echo ⚠️  WARNING: This will load TOÀN BỘ dataset (no limit)
+echo [WARN]  WARNING: This will load TOÀN BỘ dataset (no limit)
 echo    For large datasets (117M rows), use train_large_dataset.bat instead
 echo.
 python -m ML.train_ueba --cert-dir Dataset --synthetic synthetic_events.jsonl --output worker/ml_models/ueba_iso_forest.pkl --contamination 0.01 --n-estimators 100

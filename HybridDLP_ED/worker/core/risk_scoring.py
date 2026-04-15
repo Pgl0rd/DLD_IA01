@@ -540,7 +540,7 @@ class ResearchBasedRiskScoringEngine:
                 'anomaly_score': 60,
                 'behavioral_deviation_score': 70,
                 'content_sensitivity_score': 80,
-                'temporal_risk_score': 3,
+                'temparol_risk_score': 3,
                 'frequency_risk_score': 4,
                 'action': 'alert',
                 'details': {...}
@@ -589,10 +589,10 @@ class ResearchBasedRiskScoringEngine:
             'encrypted_zip': fast_scan_result.get('is_encrypted_zip', False)
         }
         
-        # 4. Temporal Risk Score (T) - 10%
-        temporal_risk_score = self._calculate_temporal_risk_score(event_context)
-        scores['temporal_risk_score'] = temporal_risk_score
-        details['temporal'] = {
+        # 4. Temparol Risk Score (T) - 10%
+        temparol_risk_score = self._calculate_temparol_risk_score(event_context)
+        scores['temparol_risk_score'] = temparol_risk_score
+        details['temparol'] = {
             'time': event_context.get('time', 'unknown'),
             'is_off_hours': event_context.get('is_off_hours', False),
             'is_weekend': event_context.get('is_weekend', False)
@@ -611,7 +611,7 @@ class ResearchBasedRiskScoringEngine:
             scores['anomaly_score'] * self.weights['anomaly'] +
             scores['behavioral_deviation_score'] * self.weights['behavioral_deviation'] +
             scores['content_sensitivity_score'] * self.weights['content_sensitivity'] +
-            scores['temporal_risk_score'] * self.weights['temporal'] +
+            scores['temparol_risk_score'] * self.weights['temparol'] +
             scores['frequency_risk_score'] * self.weights['frequency']
         )
         
@@ -782,10 +782,10 @@ class ResearchBasedRiskScoringEngine:
         
         return min(score, 100) / 10.0
     
-    def _calculate_temporal_risk_score(self, context: Dict[str, Any]) -> float:
+    def _calculate_temparol_risk_score(self, context: Dict[str, Any]) -> float:
         """
-        Calculate Temporal Risk Score (T)
-        T = temporal_base_score + off_hours_penalty + weekend_penalty
+        Calculate Temparol Risk Score (T)
+        T = temparol_base_score + off_hours_penalty + weekend_penalty
         """
         score = 0
         time_str = str(context.get('time', ''))
@@ -815,7 +815,7 @@ class ResearchBasedRiskScoringEngine:
             is_off_hours = context.get('is_off_hours', False)
             is_weekend = context.get('is_weekend', False)
         
-        # Calculate temporal score
+        # Calculate temparol score
         if is_off_hours and is_weekend:
             score = 45
         elif is_off_hours:

@@ -51,10 +51,10 @@ def decide_recommended_action(
     if em_code == "A" and final_risk >= max(alert_th - 0.3, cvss_medium + 0.8):
         action = "alert"
         if label == "log_only":
-            label = "maturity_active_escalated"
+            label = "temparol_active_escalated"
     elif em_code == "U" and final_risk < alert_th and content_sensitivity < 5.5:
         action = "log"
-        label = "maturity_preliminary_watch"
+        label = "temparol_preliminary_watch"
 
     return action, label
 

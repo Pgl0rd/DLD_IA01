@@ -1,20 +1,20 @@
 # Hướng Dẫn Train với Dataset Lớn (117 triệu rows)
 
-## ⚠️ Vấn đề
+## [WARN] Vấn đề
 
 Với file email.csv có **117 triệu rows**, nếu load toàn bộ vào memory sẽ:
 - Hết RAM (cần ~50-100GB RAM)
 - Training rất chậm
 - Có thể crash hệ thống
 
-## ✅ Giải pháp: Streaming + Sampling
+## [OK] Giải pháp: Streaming + Sampling
 
 Code đã được tối ưu với:
 1. **Streaming mode**: Đọc và xử lý từng chunk, không load toàn bộ vào memory
 2. **Feature extraction on-the-fly**: Extract features ngay khi đọc, không lưu events
 3. **Sampling option**: Sample một phần data để train nhanh hơn
 
-## 🚀 Cách sử dụng
+## [START] Cách sử dụng
 
 ### Option 1: Sample 1% data (Khuyến nghị cho 117M rows)
 
@@ -70,7 +70,7 @@ cd HybridDLP_ED/ML
 train_large_dataset.bat
 ```
 
-## 📊 So sánh Options
+## [CHART] So sánh Options
 
 | Option | Sample Ratio | Events | RAM Usage | Training Time | Quality |
 |--------|-------------|--------|-----------|---------------|---------|
@@ -79,13 +79,13 @@ train_large_dataset.bat
 | Limit 2M/file | None | ~6M | ~4-6GB | 30-60 phút | Good |
 | Full Dataset | None | ~120M+ | 50-100GB+ | 10+ giờ | Best (nhưng không practical) |
 
-## 🎯 Khuyến nghị
+## [TARGET] Khuyến nghị
 
 **Cho dataset 117M rows:**
 - **Option 1 (1% sample)** là tốt nhất: Đủ data để train model tốt, nhanh, tiết kiệm memory
 - Isolation Forest không cần toàn bộ data, 1-2M samples đã đủ để học patterns
 
-## 🔧 Tham số
+##  Tham số
 
 | Tham số | Mô tả | Ví dụ |
 |---------|-------|-------|
@@ -97,12 +97,12 @@ train_large_dataset.bat
 ## ⚡ Tối ưu Memory
 
 Code đã tự động:
-- ✅ Streaming CSV files (chunk size: 10k rows)
-- ✅ Extract features on-the-fly (không lưu events)
-- ✅ Sliding window cho frequency features (chỉ giữ 1000 events gần nhất)
-- ✅ Giải phóng memory sau mỗi chunk
+- [OK] Streaming CSV files (chunk size: 10k rows)
+- [OK] Extract features on-the-fly (không lưu events)
+- [OK] Sliding window cho frequency features (chỉ giữ 1000 events gần nhất)
+- [OK] Giải phóng memory sau mỗi chunk
 
-## 📝 Log Output
+## [DOC] Log Output
 
 Bạn sẽ thấy:
 ```
@@ -110,14 +110,14 @@ Streaming email events from: Dataset/email.csv/email.csv
 Using sampling ratio: 1.0%
   Streamed 50,000 email events...
   Streamed 100,000 email events...
-✅ Streamed 1,170,000 email events
+[OK] Streamed 1,170,000 email events
 
 Processing CERT dataset in chunks...
-✅ Processed 1,170,000 CERT events
-✅ Total features extracted: 2,500,000 from 2,500,000 events
+[OK] Processed 1,170,000 CERT events
+[OK] Total features extracted: 2,500,000 from 2,500,000 events
 ```
 
-## 💡 Tips
+## [HINT] Tips
 
 1. **Bắt đầu với 1% sample** để test
 2. Nếu model tốt → giữ nguyên

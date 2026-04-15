@@ -1,6 +1,6 @@
 # Thêm Trọng Số Cho Các Case Cao Risk (ChatGPT, USB)
 
-## 🎯 Vấn Đề
+## [TARGET] Vấn Đề
 
 Các case như:
 - **Copy vào ChatGPT** (external chat app)
@@ -9,7 +9,7 @@ Các case như:
 
 Nên có **trọng số cao hơn** để model phát hiện dễ hơn.
 
-## ✅ Giải Pháp Đã Triển Khai
+## [OK] Giải Pháp Đã Triển Khai
 
 ### 1. Feature Weights trong Feature Extractor
 
@@ -84,7 +84,7 @@ risk_boost = _calculate_risk_boost(features)
 anomaly_score = min(100.0, base_anomaly_score + risk_boost)
 ```
 
-## 📊 Trọng Số Chi Tiết
+## [CHART] Trọng Số Chi Tiết
 
 | Case | Feature Weight | Risk Boost | Tổng Impact |
 |------|----------------|------------|-------------|
@@ -94,7 +94,7 @@ anomaly_score = min(100.0, base_anomaly_score + risk_boost)
 | **USB Transfer** | usb_bytes x2.0 | +10 points | **Cao** |
 | **Bulk Paste** | clipboard_pastes x1.5 | +5 points | **Trung bình** |
 
-## 🎯 Kết Quả Mong Đợi
+## [TARGET] Kết Quả Mong Đợi
 
 ### Trước khi thêm trọng số:
 - Normal Event: 41.09
@@ -106,7 +106,7 @@ anomaly_score = min(100.0, base_anomaly_score + risk_boost)
 - Anomalous Off-hours: **~65-75** (+15-25 points)
 - Anomalous USB: **~75-85** (+25-35 points)
 
-## 🚀 Test Lại
+## [START] Test Lại
 
 ### Bước 1: Train lại model
 
@@ -122,15 +122,15 @@ test_model.bat
 ```
 
 **Kỳ vọng:**
-- Normal Event: Score < 50 ✅
-- Anomalous Off-hours: Score **65-80** ⚠️ (tăng từ 49)
-- Anomalous USB: Score **75-90** ⚠️ (tăng từ 50)
+- Normal Event: Score < 50 [OK]
+- Anomalous Off-hours: Score **65-80** [WARN] (tăng từ 49)
+- Anomalous USB: Score **75-90** [WARN] (tăng từ 50)
 
-## ✅ Kết Luận
+## [OK] Kết Luận
 
 **Đã thêm trọng số cho các case cao risk:**
-1. ✅ Feature weights trong feature extractor
-2. ✅ Risk boost trong ML analyzer
-3. ✅ Ưu tiên USB và ChatGPT
+1. [OK] Feature weights trong feature extractor
+2. [OK] Risk boost trong ML analyzer
+3. [OK] Ưu tiên USB và ChatGPT
 
 **Model sẽ phát hiện các case này dễ hơn!**

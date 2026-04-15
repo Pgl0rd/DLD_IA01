@@ -56,7 +56,7 @@ class SystemTrayApp:
             try:
                 show_main_window(on_close_callback=lambda: None)
             except Exception as e:
-                print(f"❌ Error showing control center: {e}")
+                print(f"[FAIL] Error showing control center: {e}")
         
         thread = threading.Thread(target=show_gui, daemon=True)
         thread.start()
@@ -66,21 +66,21 @@ class SystemTrayApp:
         def run_wizard():
             try:
                 if run_setup_wizard():
-                    print("✅ Setup completed")
+                    print("[OK] Setup completed")
             except Exception as e:
-                print(f"❌ Error in setup: {e}")
+                print(f"[FAIL] Error in setup: {e}")
         
         thread = threading.Thread(target=run_wizard, daemon=True)
         thread.start()
     
     def _on_sensor_status(self, icon, item):
         """Show sensor status."""
-        status = "🟢 Running" if self.manager.is_sensor_running() else "🔴 Stopped"
+        status = " Running" if self.manager.is_sensor_running() else " Stopped"
         print(f"[Sensor] Status: {status}")
     
     def _on_worker_status(self, icon, item):
         """Show worker status."""
-        status = "🟢 Running" if self.manager.is_worker_running() else "🔴 Stopped"
+        status = " Running" if self.manager.is_worker_running() else " Stopped"
         print(f"[Worker] Status: {status}")
 
     def _on_start_worker(self, icon, item):
@@ -100,12 +100,12 @@ class SystemTrayApp:
     
     def _create_menu(self):
         """Tạo context menu."""
-        sensor_status = "🟢 Running" if self.manager.is_sensor_running() else "🔴 Stopped"
-        worker_status = "🟢 Running" if self.manager.is_worker_running() else "🔴 Stopped"
+        sensor_status = " Running" if self.manager.is_sensor_running() else " Stopped"
+        worker_status = " Running" if self.manager.is_worker_running() else " Stopped"
         
         menu_items = [
             MenuItem(
-                "🎛️  Control Center",
+                "️  Control Center",
                 self._on_show_control
             ),
         ]
@@ -114,7 +114,7 @@ class SystemTrayApp:
         if not is_password_set():
             menu_items.append(
                 MenuItem(
-                    "⚙️  Setup Wizard",
+                    "[SYS]  Setup Wizard",
                     self._on_setup_wizard
                 )
             )
@@ -161,7 +161,7 @@ class SystemTrayApp:
     def run(self):
         """Chạy system tray app."""
         if not HAS_PYSTRAY:
-            print("❌ pystray not installed. Install with: pip install pystray pillow")
+            print("[FAIL] pystray not installed. Install with: pip install pystray pillow")
             return False
         
         try:
@@ -188,14 +188,14 @@ class SystemTrayApp:
                 try:
                     self.icon.run()
                 except Exception as e:
-                    print(f"❌ Tray icon error: {e}")
+                    print(f"[FAIL] Tray icon error: {e}")
             
             self.tray_thread = threading.Thread(target=run_icon, daemon=True)
             self.tray_thread.start()
             
             return True
         except Exception as e:
-            print(f"❌ Error creating system tray: {e}")
+            print(f"[FAIL] Error creating system tray: {e}")
             return False
     
     def wait(self):

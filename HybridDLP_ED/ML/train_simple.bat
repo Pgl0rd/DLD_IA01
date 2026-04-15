@@ -14,7 +14,7 @@ if errorlevel 1 (
 echo.
 echo === Training UEBA Model với CERT Dataset ONLY ===
 echo.
-echo ⚠️  WARNING: This will load TOÀN BỘ CERT dataset (no limit)
+echo [WARN]  WARNING: This will load TOÀN BỘ CERT dataset (no limit)
 echo    For large datasets (117M rows), use train_large_dataset.bat instead
 echo.
 python -m ML.train_ueba --cert-dir Dataset --output worker/ml_models/ueba_iso_forest.pkl
