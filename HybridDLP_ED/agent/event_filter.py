@@ -34,6 +34,7 @@ class EventFilter:
         self.excluded_event_types: Set[str] = set()
         self.excluded_path_patterns: List[str] = []
         self.excluded_file_names: List[str] = []
+        self.excluded_extensions: Set[str] = set()
         self.excluded_domains: Set[str] = set()
         self.enabled = True
         self.verbose = False
@@ -104,6 +105,18 @@ class EventFilter:
                     n.lower() for n in names_str.split("|") if n.strip()
                 ]
 
+        # Parse excluded_extensions (e.g., ".mkv", ".log", etc.)
+        if isinstance(config.get("excluded_extensions"), list):
+            self.excluded_extensions = set(
+                e.lower() for e in config["excluded_extensions"] if e
+            )
+        else:
+            extensions_str = config.get("excluded_extensions", "")
+            if isinstance(extensions_str, str) and extensions_str.strip():
+                self.excluded_extensions = set(
+                    e.lower() for e in extensions_str.split("|") if e.strip()
+                )
+
         # Parse excluded_domains
         if isinstance(config.get("excluded_domains"), list):
             self.excluded_domains = set(d.lower() for d in config["excluded_domains"] if d)
@@ -153,6 +166,10 @@ class EventFilter:
         # DLP_EVENT_FILTER_EXCLUDED_FILE_NAMES: "WiredTiger.turtle|*.log|..."
         if os.getenv("DLP_EVENT_FILTER_EXCLUDED_FILE_NAMES"):
             config["excluded_file_names"] = os.getenv("DLP_EVENT_FILTER_EXCLUDED_FILE_NAMES")
+
+        # DLP_EVENT_FILTER_EXCLUDED_EXTENSIONS: ".mkv|.txt|..."
+        if os.getenv("DLP_EVENT_FILTER_EXCLUDED_EXTENSIONS"):
+            config["excluded_extensions"] = os.getenv("DLP_EVENT_FILTER_EXCLUDED_EXTENSIONS")
 
         # DLP_EVENT_FILTER_EXCLUDED_DOMAINS: "google.com|microsoft.com|..."
         if os.getenv("DLP_EVENT_FILTER_EXCLUDED_DOMAINS"):
@@ -222,6 +239,13 @@ class EventFilter:
                         print(f"[EVENT_FILTER] Drop: file name '{name_pattern}' in '{file_name}'")
                     return True
 
+        # Rule 5.5: Check file extension (object.ext field)
+        file_ext = str(obj.get("ext") or "").lower()
+        if file_ext and file_ext in self.excluded_extensions:
+            if self.verbose:
+                print(f"[EVENT_FILTER] Drop: file extension '{file_ext}'")
+            return True
+
         # Rule 6: Check domain/network
         context = event.get("context") if isinstance(event.get("context"), dict) else {}
         fg_domain = str(context.get("fg_domain") or "").lower()
@@ -248,6 +272,7 @@ class EventFilter:
             "excluded_event_types": list(self.excluded_event_types),
             "excluded_path_patterns": self.excluded_path_patterns,
             "excluded_file_names": self.excluded_file_names,
+            "excluded_extensions": list(self.excluded_extensions),
             "excluded_domains": list(self.excluded_domains),
             "verbose": self.verbose,
         }

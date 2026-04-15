@@ -52,7 +52,7 @@ API_KEY    = get_api_key()      # Key của máy này
 # ============================================================
 
 
-BATCH_SIZE     = 20      # Gửi khi đủ 20 events
+BATCH_SIZE     = 5      
 FLUSH_INTERVAL = 5       # Hoặc mỗi 5 giây, tùy cái nào đến trước
 TIMEOUT        = 5       # Timeout HTTP (giây)
 

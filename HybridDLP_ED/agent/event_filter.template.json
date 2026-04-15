@@ -23,10 +23,13 @@
     "updater.exe",
     "code.exe",
     "audiodg.exe",
-    "Code.exe",
     "docker.exe",
     "wallpaper64.exe",
-    "wermgr.exe"
+    "wermgr.exe",
+    "obs-ffmpeg-mux.exe",
+    "obs64.exe",
+    "obs-virtualcam64.exe",
+    "smartscreen.exe"
   ],
   "excluded_event_types": [
     "heartbeat"
@@ -56,6 +59,9 @@
     "WiredTiger.turtle.set",
     "WiredTigerLog.*",
     "metrics.interim"
+  ],
+  "excluded_extensions": [
+    ".mkv"
   ],
   "excluded_domains": []
 }

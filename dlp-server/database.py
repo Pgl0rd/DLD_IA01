@@ -28,22 +28,37 @@ def init_db():
     conn = get_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS events (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            machine_name TEXT    NOT NULL DEFAULT 'unknown',
-            received_at  TEXT    NOT NULL,
+            id                      INTEGER PRIMARY KEY AUTOINCREMENT,
+            machine_name            TEXT    NOT NULL DEFAULT 'unknown',
+            received_at             TEXT    NOT NULL,
 
-            -- Các field giữ nguyên từ alerts.json
-            timestamp    TEXT,
-            risk_score   REAL,
-            action       TEXT,
-            file_path    TEXT,
-            file_name    TEXT,
-            keywords     TEXT,   -- lưu dạng JSON array string
-            window_title TEXT,
-            process_name TEXT,
-            user         TEXT,
-            source       TEXT,
-            is_clipboard INTEGER
+            -- Các field cơ bản từ alerts.json
+            timestamp               TEXT,
+            risk_score              REAL,
+            action                  TEXT,
+            file_path               TEXT,
+            file_name               TEXT,
+            keywords                TEXT,   -- JSON array string
+            window_title            TEXT,
+            process_name            TEXT,
+            user                    TEXT,
+            source                  TEXT,
+            is_clipboard            INTEGER,
+
+            -- Chi tiết Match từ Detection Engine (mới)
+            yara_matches_count      INTEGER DEFAULT 0,
+            behavioral_matches_count INTEGER DEFAULT 0,
+            yara_rules_matched      TEXT,   -- JSON array: [{"rule": "name", "strings": [...]}]
+            behavioral_rules_matched TEXT,  -- JSON array: [{"rule": "name", "score": 0.5}]
+            
+            -- Chi tiết Risk Scoring
+            risk_score_breakdown    TEXT,   -- JSON: {"keyword_score": 0.5, "behavioral_score": 0.3, ...}
+            action_reason           TEXT,   -- Lý do chọn action này
+            
+            -- Metadata chi tiết
+            event_type              TEXT,   -- clipboard, file, process, etc.
+            content_size            INTEGER,-- Size of content checked
+            check_duration_ms       INTEGER -- Thời gian xử lý (ms)
         )
     """)
     conn.execute("""
@@ -74,8 +89,12 @@ def insert_event(machine_name: str, event: dict) -> int:
             timestamp, risk_score, action,
             file_path, file_name, keywords,
             window_title, process_name,
-            user, source, is_clipboard
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            user, source, is_clipboard,
+            yara_matches_count, behavioral_matches_count,
+            yara_rules_matched, behavioral_rules_matched,
+            risk_score_breakdown, action_reason,
+            event_type, content_size, check_duration_ms
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, (
         machine_name,
         now_vn().isoformat(),
@@ -90,6 +109,16 @@ def insert_event(machine_name: str, event: dict) -> int:
         event.get("user"),
         event.get("source"),
         1 if event.get("is_clipboard") else 0,
+        # Chi tiết match
+        event.get("yara_matches_count", 0),
+        event.get("behavioral_matches_count", 0),
+        json.dumps(event.get("yara_rules_matched") or []),
+        json.dumps(event.get("behavioral_rules_matched") or []),
+        json.dumps(event.get("risk_score_breakdown") or {}),
+        event.get("action_reason", ""),
+        event.get("event_type", "unknown"),
+        event.get("content_size", 0),
+        event.get("check_duration_ms", 0),
     ))
     new_id = cur.lastrowid
     conn.commit()
@@ -116,6 +145,15 @@ def insert_batch(machine_name: str, events: list) -> int:
         e.get("user"),
         e.get("source"),
         1 if e.get("is_clipboard") else 0,
+        e.get("yara_matches_count", 0),
+        e.get("behavioral_matches_count", 0),
+        json.dumps(e.get("yara_rules_matched") or []),
+        json.dumps(e.get("behavioral_rules_matched") or []),
+        json.dumps(e.get("risk_score_breakdown") or {}),
+        e.get("action_reason", ""),
+        e.get("event_type", "unknown"),
+        e.get("content_size", 0),
+        e.get("check_duration_ms", 0),
     ) for e in events]
 
     conn.executemany("""
@@ -124,8 +162,12 @@ def insert_batch(machine_name: str, events: list) -> int:
             timestamp, risk_score, action,
             file_path, file_name, keywords,
             window_title, process_name,
-            user, source, is_clipboard
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+            user, source, is_clipboard,
+            yara_matches_count, behavioral_matches_count,
+            yara_rules_matched, behavioral_rules_matched,
+            risk_score_breakdown, action_reason,
+            event_type, content_size, check_duration_ms
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     """, rows)
     conn.commit()
     conn.close()
@@ -165,6 +207,10 @@ def query_events(
         d = dict(r)
         d["keywords"] = json.loads(d["keywords"] or "[]")
         d["is_clipboard"] = bool(d["is_clipboard"])
+        # Parse JSON fields (mới)
+        d["yara_rules_matched"] = json.loads(d["yara_rules_matched"] or "[]")
+        d["behavioral_rules_matched"] = json.loads(d["behavioral_rules_matched"] or "[]")
+        d["risk_score_breakdown"] = json.loads(d["risk_score_breakdown"] or "{}")
         result.append(d)
     return result
 

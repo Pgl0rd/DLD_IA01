@@ -848,6 +848,85 @@ async function openModal(id) {
     const sev   = severity(e.risk_score);
     const fmt   = ts => ts ? ts.replace('T',' ').substring(0,19) : '—';
     const kws   = arr => (arr||[]).map(k=>`<span class="kw-tag">${k}</span>`).join('')||'—';
+    
+    // Helper: safely parse JSON fields
+    const safeArray = (val) => {
+      if (Array.isArray(val)) return val;
+      if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch(e) { return []; }
+      }
+      return [];
+    };
+    const safeObject = (val) => {
+      if (typeof val === 'object' && val !== null) return val;
+      if (typeof val === 'string') {
+        try { return JSON.parse(val); } catch(e) { return {}; }
+      }
+      return {};
+    };
+    
+    // Parse match details
+    const yaraMatches = safeArray(e.yara_rules_matched);
+    const behavioralMatches = safeArray(e.behavioral_rules_matched);
+    const riskBreakdown = safeObject(e.risk_score_breakdown);
+    
+    // Format YARA matches
+    const yaraHtml = (yaraMatches && yaraMatches.length > 0)
+      ? `<div style="background:#fff7ed;padding:12px;border-radius:6px;border-left:3px solid #f59e0b;">
+          <strong style="color:#92400e">🔍 YARA Matches (${e.yara_matches_count || 0})</strong><br>
+          ${yaraMatches.map(r => `
+            <div style="margin-top:8px;padding:8px;background:#fef3c7;border-radius:4px;">
+              <div><strong>${r.rule || 'Unknown'}</strong></div>
+              <div style="font-size:11px;color:#92400e;margin-top:4px">Patterns: ${(r.strings||[]).join(', ') || 'N/A'}</div>
+            </div>
+          `).join('')}
+        </div>`
+      : '';
+    
+    // Format Behavioral matches
+    const behavioralHtml = (behavioralMatches && behavioralMatches.length > 0)
+      ? `<div style="background:#f0fdf4;padding:12px;border-radius:6px;border-left:3px solid #22c55e;margin-top:12px;">
+          <strong style="color:#166534">🧠 Behavioral Matches (${e.behavioral_matches_count || 0})</strong><br>
+          ${behavioralMatches.map(r => `
+            <div style="margin-top:6px;padding:6px;background:#dcfce7;border-radius:4px;">
+              <div><strong>${r.rule || 'Unknown'}</strong> <span style="float:right;background:#22c55e;color:white;padding:2px 6px;border-radius:3px;font-size:10px">${(r.score||0).toFixed(2)}</span></div>
+              ${r.reason ? `<div style="font-size:11px;color:#166534;margin-top:3px">${r.reason}</div>` : ''}
+            </div>
+          `).join('')}
+        </div>`
+      : '';
+    
+    // Format Risk Breakdown
+    const breakdownHtml = (Object.keys(riskBreakdown).length > 0)
+      ? `<div style="background:#f8f9fa;padding:12px;border-radius:6px;border-left:3px solid #3b82f6;margin-top:12px;">
+          <strong style="color:#1d4ed8">📊 Risk Score Breakdown</strong><br>
+          <table style="width:100%;margin-top:8px;font-size:12px;border-collapse:collapse;">
+            ${Object.entries(riskBreakdown).map(([key, val]) => `
+              <tr style="border-bottom:1px solid #e5e7eb;">
+                <td style="padding:6px">${key.replace(/_/g,' ')}</td>
+                <td style="text-align:right;padding:6px;font-weight:600;color:#1d4ed8">${(val||0).toFixed(2)}</td>
+              </tr>
+            `).join('')}
+          </table>
+        </div>`
+      : '';
+    
+    // Format Action Reason
+    const reasonHtml = e.action_reason
+      ? `<div style="background:#fef2f2;padding:12px;border-radius:6px;border-left:3px solid #ef4444;margin-top:12px;">
+          <strong style="color:#991b1b">ℹ️ Action Reason</strong><br>
+          <p style="margin:8px 0 0;font-size:12px;color:#7f1d1d">${e.action_reason}</p>
+        </div>`
+      : '';
+    
+    // Format Duration & Size
+    const metadataHtml = (e.check_duration_ms || e.content_size)
+      ? `<div style="background:#f0f4f8;padding:12px;border-radius:6px;margin-top:12px;display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:12px;">
+          ${e.check_duration_ms ? `<div><label style="color:#64748b">⏱️ Processing Time</label><p style="font-weight:600;color:#1d4ed8">${e.check_duration_ms}ms</p></div>` : ''}
+          ${e.content_size ? `<div><label style="color:#64748b">📦 Content Size</label><p style="font-weight:600;color:#1d4ed8">${(e.content_size / 1024).toFixed(1)}KB</p></div>` : ''}
+        </div>`
+      : '';
+    
     cont.innerHTML = `
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;">
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">🖥 Máy</label><p style="margin:4px 0 0;font-weight:600">${e.machine_name||'—'}</p></div>
@@ -857,13 +936,24 @@ async function openModal(id) {
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">✋ Action</label><p style="margin:4px 0 0"><span class="pill pill-${e.action}">${e.action}</span></p></div>
         <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;">👤 User</label><p style="margin:4px 0 0;font-weight:600">${e.user||'—'}</p></div>
       </div>
+      
       <div style="border-top:1px solid var(--border);padding-top:16px;display:flex;flex-direction:column;gap:12px;">
-        ${['📁 File path|file_path','🗂 Tên file|file_name','🪟 Window title|window_title','⚙️ Process|process_name','📍 Source|source'].map(s=>{
-          const [lbl,key]=s.split('|');
-          return `<div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;display:block;margin-bottom:4px">${lbl}</label><p style="background:#f8fafc;padding:8px;border-radius:6px;word-break:break-all;font-family:monospace;font-size:12px;margin:0">${e[key]||'—'}</p></div>`;
-        }).join('')}
-        <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;display:block;margin-bottom:4px">🔑 Keywords</label><p style="margin:0">${kws(e.keywords)}</p></div>
-      </div>`;
+        <div>
+          ${['📁 File path|file_path','🗂 Tên file|file_name','🪟 Window title|window_title','⚙️ Process|process_name','📍 Source|source'].map(s=>{
+            const [lbl,key]=s.split('|');
+            return `<div style="margin-bottom:12px;"><label style="font-size:11px;color:var(--muted);text-transform:uppercase;display:block;margin-bottom:4px">${lbl}</label><p style="background:#f8fafc;padding:8px;border-radius:6px;word-break:break-all;font-family:monospace;font-size:12px;margin:0">${e[key]||'—'}</p></div>`;
+          }).join('')}
+          <div><label style="font-size:11px;color:var(--muted);text-transform:uppercase;display:block;margin-bottom:4px">🔑 Keywords</label><p style="margin:0">${kws(e.keywords)}</p></div>
+        </div>
+      </div>
+      
+      <!-- Chi tiết Match Mới -->
+      ${yaraHtml}
+      ${behavioralHtml}
+      ${breakdownHtml}
+      ${reasonHtml}
+      ${metadataHtml}
+    `;
   } catch(ex) {
     cont.innerHTML = `<p style="color:var(--red)">❌ ${ex.message}</p>`;
   }
