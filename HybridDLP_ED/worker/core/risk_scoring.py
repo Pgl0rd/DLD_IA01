@@ -224,6 +224,23 @@ class RiskScoringEngine:
         
         # Quyết định hành động
         total_score = _clamp_0_10(total_score)
+        
+        # UEBA Anomaly Assurance:
+        ml_is_anomaly = event_context.get("ml_is_anomaly", False)
+        ml_anomaly_score = _safe_float(event_context.get("ml_anomaly_score", 0.0))
+        boost_threshold = getattr(WorkerConfig, "ML_ANOMALY_BOOST_THRESHOLD", 7.0)
+        
+        if ml_is_anomaly and ml_anomaly_score >= boost_threshold:
+            alert_threshold = self.thresholds.get("alert", 4.0)
+            if total_score < alert_threshold:
+                boosted = min(10.0, max(alert_threshold, ml_anomaly_score * 0.9))
+                logger.warning(
+                    f"Traditional Score Boost: UEBA Anomaly ({ml_anomaly_score:.2f}) vượt ngưỡng {boost_threshold}. "
+                    f"Tự động boost final risk từ {total_score:.2f} lên {boosted:.2f} để cảnh báo (Alert) lên Dashboard."
+                )
+                total_score = boosted
+                details['ueba_force_alert'] = True
+                
         action = self._determine_action(total_score)
         risk_level = classify_risk_level(total_score)
         

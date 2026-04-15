@@ -55,6 +55,26 @@ class CVSSDLPScoringEngine:
         if forced:
             logger.warning("CVSS-DLP: force_max_risk applied")
 
+        # UEBA Anomaly Assurance (Noteupdate § ML Integration):
+        # Nếu ML UEBA phát hiện bất thường với độ nghiêm trọng cao nhưng bị 
+        # công thức CVSS làm loãng (do không có file/content nhạy cảm), 
+        # ta vẫn phải ép điểm lên trên mức Alert để cảnh báo lên Dashboard.
+        ml_is_anomaly = event_context.get("ml_is_anomaly", False)
+        ml_anomaly_score = float(event_context.get("ml_anomaly_score") or 0.0)
+        boost_threshold = getattr(WorkerConfig, "ML_ANOMALY_BOOST_THRESHOLD", 7.0)
+        
+        if ml_is_anomaly and ml_anomaly_score >= boost_threshold:
+            alert_threshold = getattr(WorkerConfig, "RISK_THRESHOLDS", {}).get("alert", 4.0)
+            if total < alert_threshold:
+                # Boost tỷ lệ theo mức độ nghiêm trọng của anomaly (Ví dụ: 8.04 -> 7.2)
+                boosted_total = min(10.0, max(alert_threshold, ml_anomaly_score * 0.9))
+                logger.warning(
+                    f"CVSS-DLP Boost: UEBA Anomaly score ({ml_anomaly_score:.2f}) vượt ngưỡng {boost_threshold}. "
+                    f"Tự động boost final risk từ {total:.2f} lên {boosted_total:.2f} để cảnh báo (Alert) lên Dashboard."
+                )
+                total = boosted_total
+                forced = True
+
         action, rec_label = decide_recommended_action(
             total,
             str(em["exfiltration_temparol"]),
