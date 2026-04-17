@@ -1151,7 +1151,8 @@ class ContextCorrelator:
                             self._dbg("corr_suspected_upload", dest_domain, bytes_sent, proc_name)
                             out.append(self._make_corr(corr_raw, now_unix))
 
-                if self._staging_recent and not _classify_network_target_is_gpt_safe(evt=self._classify_network_target(evt)):
+                # Tạm thời tắt corr_network_exfil_suspected theo chiều hướng vô hiệu hoá
+                if False and self._staging_recent and not _classify_network_target_is_gpt_safe(evt=self._classify_network_target(evt)):
                     dest_domain = _evt_dest_domain(evt)
                     bytes_sent = _evt_bytes_sent(evt)
                     key = f"net_exfil:{dest_domain}:{bytes_sent // 1024}"

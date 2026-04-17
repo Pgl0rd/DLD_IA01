@@ -37,6 +37,7 @@ from core.report_generator import ReportGenerator
 from core.behavioral_rules import BehavioralRulesEngine
 from core.file_stability import wait_until_file_stable
 from core.ocr_setup import ensure_tesseract
+from database.processed_events_db import ProcessedEventsDB
 # Import ML module from ML folder
 ML_DIR = Path(__file__).parent.parent / "ML"
 if ML_DIR.exists():
@@ -115,6 +116,7 @@ class DetectionEngine:
         # Lazy UEBA — không load model trong __init__ (Noteupdate: lazy ML)
         self._ml_analyzer = None
         self._correlator, self._pqueue = _make_correlator_and_pqueue()
+        self.processed_events_db = ProcessedEventsDB(WorkerConfig.WORKER_DIR / "database")
         # Chống alert trùng cùng SHA-256 trong cửa sổ thời gian (Noteupdate §19)
         self._alert_dedup = {}  # type: ignore[var-annotated]
         
@@ -142,6 +144,34 @@ class DetectionEngine:
         if self._ml_analyzer is None:
             self._ml_analyzer = BehavioralMLAnalyzer()
         return self._ml_analyzer
+
+    def _save_processed_event(self, event: dict, risk_result: dict, fast_scan_result: dict, behavioral_matches: list):
+        try:
+            event_id = event.get('event_id', 'unknown')
+            event_type = event.get('type') or event.get('event_type', 'unknown')
+            risk_score = float(risk_result.get('total_score', 0.0))
+            
+            matched_rules = []
+            if fast_scan_result:
+                yara_matches = fast_scan_result.get('yara_matches', [])
+                for match in yara_matches:
+                    r = match.get('rule')
+                    if r: matched_rules.append(r)
+                    
+            if behavioral_matches:
+                for match in behavioral_matches:
+                    r = match.get('rule')
+                    if r: matched_rules.append(r)
+            
+            self.processed_events_db.insert_event(
+                event_id=event_id,
+                event_type=event_type,
+                risk_score=risk_score,
+                matched_rules=matched_rules,
+                event_payload=event
+            )
+        except Exception as e:
+            logger.error(f"Error saving processed event to db: {e}", exc_info=True)
 
     def _normalize_filename(self, value: str) -> str:
         return str(value or "").strip().lower()
@@ -827,6 +857,8 @@ class DetectionEngine:
             if len(self.event_history) > self.max_history_size:
                 self.event_history.pop(0)  # Remove oldest event
             
+            self._save_processed_event(event, risk_result, fast_scan_result, behavioral_matches)
+            
             self.processed_count += 1
             
             logger.info(
@@ -1157,6 +1189,8 @@ class DetectionEngine:
                 report
             )
             
+            self._save_processed_event(event, risk_result, fast_scan_result, behavioral_matches)
+            
             self.processed_count += 1
             
             logger.info(
@@ -1355,6 +1389,8 @@ class DetectionEngine:
                 risk_result['details'], event_context, report
             )
 
+            self._save_processed_event(event, risk_result, fast_scan_result, behavioral_matches)
+
             self.processed_count += 1
 
             logger.info(
@@ -1519,6 +1555,8 @@ class DetectionEngine:
             self.event_history.append(event.copy())
             if len(self.event_history) > self.max_history_size:
                 self.event_history.pop(0)  # Remove oldest event
+            
+            self._save_processed_event(event, risk_result, fast_scan_result, behavioral_matches)
             
             self.processed_count += 1
             
