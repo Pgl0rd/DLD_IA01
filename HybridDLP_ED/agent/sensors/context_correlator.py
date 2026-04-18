@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import os
 from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -533,6 +534,126 @@ class ContextCorrelator:
         self._recent_corr_keys: Deque[Tuple[float, str]] = deque()
         self._clipboard_usb = ClipboardUsbMatcher(dedupe_fn=lambda k, t: self._dedupe_ok(k, t))
 
+        _default_noise = (
+            "\\windows\\",
+            "\\program files\\",
+            "\\program files (x86)\\",
+            "\\programdata\\",
+            "\\appdata\\",
+            "\\system32\\",
+            "\\$recycle.bin\\",
+            "\\system volume information\\",
+            "\\cache\\",
+            "\\dawncache\\",
+            "\\local storage\\leveldb\\",
+            "\\session storage\\",
+            "\\webstorage\\",
+            "\\antigravity\\",
+            "\\code cache\\",
+            "\\gpucache\\",
+            "\\python\\python312\\",
+            "\\python\\python311\\",
+            "\\python\\python310\\",
+            "\\hybriddlp_ed\\",
+            "\\dld_ia01\\",
+            "\\programs\\cursor\\",
+            "\\.cursor\\",
+            "\\.vscode\\",
+            "\\.idea\\",
+            "\\roaming\\github desktop\\",
+            "\\zalo\\local storage\\",
+            "\\network\\",
+            "\\logs\\",
+            "\\indexeddb\\",
+            "\\service worker\\",
+            "\\localstate\\tabstate\\",
+            "\\microsoft visual studio\\",
+            "\\.git\\",
+            "\\__pycache__\\",
+            "\\node_modules\\",
+            "\\.pytest_cache\\",
+            "\\.venv\\",
+            "\\venv\\",
+            "\\site-packages\\",
+            "\\.mypy_cache\\",
+            "\\.ruff_cache\\",
+            "\\dist\\",
+            "\\build\\",
+            "\\.egg-info\\",
+        )
+        extra = os.getenv("FILE_SENSOR_EXTRA_NOISE_TOKENS", "").strip()
+        _extra_toks = tuple(
+            x.strip().lower()
+            for x in extra.split(";")
+            if x.strip()
+        )
+        self._noise_path_tokens = tuple(
+            t.lower().replace("/", "\\") for t in (_default_noise + _extra_toks)
+        )
+        self._noise_extensions = {
+            ".tmp",
+            ".temp",
+            ".log",
+            ".log1",
+            ".log2",
+            ".mui",
+            ".nlp",
+            ".dll",
+            ".db",
+            ".jsonl",
+            ".ldb",
+            ".sqlite",
+            ".journal",
+            ".wal",
+            ".idx",
+            ".pack",
+            ".pkl",
+            ".bin",
+            ".exe",
+            ".pyc",
+            ".pyo",
+            ".pyd",
+            ".so",
+            ".cache",
+            ".lock",
+            ".bak",
+            ".swp",
+            ".swo",
+            ".db-wal",
+            ".db-journal",
+            ".db-shm",
+        }
+        self._noise_json_path_markers = (
+            "\\cache\\",
+            "leveldb",
+            "code cache",
+            "vscode",
+            "cursor",
+            "appdata",
+            "node_modules",
+            ".git",
+        )
+
+    def _is_noise_event(self, evt: Dict[str, Any]) -> bool:
+        path = (_evt_path(evt) or "").lower().replace("/", "\\")
+        dst_path = (_evt_dst_path(evt) or "").lower().replace("/", "\\")
+        
+        for p in [path, dst_path]:
+            if not p:
+                continue
+            
+            ext = "." + p.rsplit(".", 1)[-1] if "." in p else ""
+            if ext in self._noise_extensions:
+                return True
+                
+            if any(t in p for t in self._noise_path_tokens):
+                if ext == ".json":
+                    if any(m in p for m in self._noise_json_path_markers):
+                        return True
+                else:
+                    return True
+        return False
+
     def _dbg(self, *args) -> None:
         if self.debug:
             try:
@@ -819,6 +940,9 @@ class ContextCorrelator:
             if source == "correlator" or etype.startswith("corr_"):
                 return out
 
+            if self._is_noise_event(evt):
+                return out
+
             self._trim(self._staging_recent, self.staging_window_sec, now_unix)
             self._trim(self._network_recent, 120.0, now_unix)
             self._trim(self._clipboard_recent, self.clip_window_sec, now_unix)
@@ -1017,7 +1141,7 @@ class ContextCorrelator:
                         corr_op_type = corr_type
                         severity = "high" if has_file_evidence else ("warn" if inferred_only else "high")
                         tags = ["corr_upload", "upload", "network", "gpt", "chatgpt"]
-                        dedupe_key = f"{corr_type}:{proc_name}:{dest_domain}:{dest_ip}:{bytes_sent // 1024}:{bool(has_file_evidence)}"
+                        dedupe_key = f"{corr_type}:{proc_name}:{dest_domain}:{dest_ip}:{bool(has_file_evidence)}"
 
                         if self._dedupe_ok(dedupe_key, now_unix):
                             corr_raw = {
@@ -1082,15 +1206,17 @@ class ContextCorrelator:
                             out.append(self._make_corr(corr_raw, now_unix))
 
                     else:
-                        severity = "high" if bytes_sent >= 256 * 1024 or staged_path else "warn"
-                        key = f"upload:{proc_name}:{dest_domain}:{dest_ip}:{bytes_sent // 1024}:{target['is_gpt']}"
-
-                        if self._dedupe_ok(key, now_unix):
-                            corr_raw = {
-                                "type": "corr_suspected_upload",
-                                "source": "correlator",
-                                "severity": _sev(severity),
-                                "ts": _iso_from_ts(now_unix),
+                        # Lọc nhiễu: Chỉ phát alert network upload nếu có bằng chứng file HOẶC lượng dữ liệu lớn
+                        if has_file_evidence or bytes_sent >= 128 * 1024:
+                            severity = "high" if bytes_sent >= 256 * 1024 or staged_path else "warn"
+                            key = f"upload:{proc_name}:{dest_domain}:{dest_ip}:{target['is_gpt']}"
+    
+                            if self._dedupe_ok(key, now_unix):
+                                corr_raw = {
+                                    "type": "corr_suspected_upload",
+                                    "source": "correlator",
+                                    "severity": _sev(severity),
+                                    "ts": _iso_from_ts(now_unix),
                                 "tags": [
                                     "corr_upload",
                                     "upload",
