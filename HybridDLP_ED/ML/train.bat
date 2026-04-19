@@ -16,12 +16,11 @@ echo === Generating Synthetic Data ===
 python -m ML.generate_synthetic_data --output synthetic_events.jsonl --normal 10000 --anomalous 50
 
 echo.
-echo === Training UEBA Model với CERT Dataset ===
+echo === Training UEBA Model voi CERT Dataset ===
 echo.
-echo [WARN]  WARNING: This will load TOÀN BỘ dataset (no limit)
-echo    For large datasets (117M rows), use train_large_dataset.bat instead
+echo [INFO] Limit: 1,000,000 rows per file (de tranh OOM voi dataset lon)
 echo.
-python -m ML.train_ueba --cert-dir Dataset --synthetic synthetic_events.jsonl --output worker/ml_models/ueba_iso_forest.pkl --contamination 0.01 --n-estimators 100
+python -m ML.train_ueba --cert-dir Dataset --synthetic synthetic_events.jsonl --output worker/ml_models/ueba_iso_forest.pkl --contamination 0.01 --n-estimators 100 --max-events-per-file 1000000
 
 echo.
 if exist worker\ml_models\ueba_iso_forest.pkl (

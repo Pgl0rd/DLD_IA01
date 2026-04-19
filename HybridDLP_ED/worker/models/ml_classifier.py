@@ -18,6 +18,7 @@ class MLClassifier:
         self.model = None
         self.vectorizer = None
         self.loaded = False
+        self._warned = False  # Log thiếu model chỉ 1 lần duy nhất
     
     def _lazy_load(self):
         """Lazy load model chỉ khi cần"""
@@ -27,11 +28,16 @@ class MLClassifier:
                 vectorizer_path = WorkerConfig.ML_VECTORIZER_PATH
                 
                 if not model_path.exists() or not vectorizer_path.exists():
-                    logger.warning(
-                        f"ML model files not found. "
-                        f"Model: {model_path.exists()}, "
-                        f"Vectorizer: {vectorizer_path.exists()}"
-                    )
+                    if not self._warned:
+                        # DEBUG thay vì WARNING — đây là trạng thái bình thường khi chưa train
+                        # UEBA (ueba_iso_forest.pkl) vẫn hoạt động độc lập với classifier này
+                        logger.debug(
+                            f"Text ML classifier not trained yet "
+                            f"(classifier.pkl={model_path.exists()}, "
+                            f"vectorizer.pkl={vectorizer_path.exists()}). "
+                            f"System will use YARA + UEBA instead."
+                        )
+                        self._warned = True
                     return False
                 
                 self.model = joblib.load(model_path)
