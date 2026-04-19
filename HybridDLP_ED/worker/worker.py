@@ -444,6 +444,12 @@ class DetectionEngine:
             if is_screenshot_event:
                 return self._process_screenshot_event(event)
 
+            # ==== Xử lý corr_* Events (ưu tiên TRƯỚC clipboard) ====
+            # corr_clipboard_exfil_suspected có chữ 'clipboard' nhưng KHÔNG phải clipboard sensor event
+            # Phải route vào special_event để tránh alert 2 lần
+            if event_type.startswith('corr_'):
+                return self._process_special_event(event)
+
             # ==== Xử lý Clipboard Events ====
             # Check nếu là clipboard event (clipboard_paste, clipboard_text, etc.)
             # Also check clipboard field exists
@@ -1522,10 +1528,23 @@ class DetectionEngine:
                     if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
                         risk_result['action'] = 'alert'
                         
-            # Cố định luôn đối với corr_* event
+            # Cố định điểm tối thiểu cho corr_* event (chỉ boost nếu còn thấp)
             if event_type.startswith('corr_') and risk_result['total_score'] < 5.0:
                 risk_result['total_score'] = 7.5
                 risk_result['action'] = 'alert'
+
+            # Dedup alert theo event_id để tránh double-alert khi cùng event bị process nhiều lần
+            if risk_result.get('action') == 'alert':
+                _dedup_key = f"corr_alert:{event_id}"
+                _now_ts = time.time()
+                _last_alert = self._alert_dedup.get(_dedup_key)
+                if _last_alert is not None and (_now_ts - _last_alert) < 30.0:
+                    logger.warning(
+                        f"[PID={pid}] Dedup corr alert suppressed (within 30s): event_id={event_id}, type={event_type}"
+                    )
+                    risk_result['action'] = 'log'
+                else:
+                    self._alert_dedup[_dedup_key] = _now_ts
 
             self._apply_filename_risk_policy(event, risk_result)
             
