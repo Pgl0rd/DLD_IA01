@@ -2,18 +2,18 @@
 Action Executor - Thực thi hành động: Block/Alert/Log
 """
 import requests
-from pathlib import Path
-from typing import Dict, Any, Optional
-from loguru import logger
-import sys
+import threading
 import json
 import os
 import time
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Dict, Any, Optional
+from loguru import logger
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
-from typing import Optional, Dict, Any
 from core.windows_notification import WindowsNotification
 
 # Import sender from agent_sender
@@ -31,6 +31,8 @@ class ActionExecutor:
         self.timeout = WorkerConfig.SERVER_TIMEOUT
         self.windows_alert_min_score = float(getattr(WorkerConfig, "WINDOWS_ALERT_MIN_SCORE", 7.0))
         self.notification = WindowsNotification()
+        # BUG FIX: Lock để tránh race condition khi nhiều thread cùng write alerts.json
+        self._dashboard_lock = threading.Lock()
         
         # Dashboard alerts.json path
         # In Docker: /app/logs/alerts.json (shared volume)
@@ -407,26 +409,28 @@ class ActionExecutor:
             
             # Load existing alerts
             alerts = []
-            if self.dashboard_log_path.exists():
-                try:
-                    with open(self.dashboard_log_path, 'r', encoding='utf-8') as f:
-                        alerts = json.load(f)
-                        if not isinstance(alerts, list):
-                            alerts = []
-                except (json.JSONDecodeError, IOError) as e:
-                    logger.warning(f"Error reading dashboard log: {e}, creating new file")
-                    alerts = []
-            
-            # Append new alert
-            alerts.append(alert_entry)
-            
-            # Keep only last 1000 alerts to prevent file from growing too large
-            if len(alerts) > 1000:
-                alerts = alerts[-1000:]
-            
-            # Write back to file
-            with open(self.dashboard_log_path, 'w', encoding='utf-8') as f:
-                json.dump(alerts, f, indent=2, ensure_ascii=False)
+            # BUG FIX: Lock để tránh race condition read-then-write khi multi-thread
+            with self._dashboard_lock:
+                if self.dashboard_log_path.exists():
+                    try:
+                        with open(self.dashboard_log_path, 'r', encoding='utf-8') as f:
+                            alerts = json.load(f)
+                            if not isinstance(alerts, list):
+                                alerts = []
+                    except (json.JSONDecodeError, IOError) as e:
+                        logger.warning(f"Error reading dashboard log: {e}, creating new file")
+                        alerts = []
+
+                # Append new alert
+                alerts.append(alert_entry)
+
+                # Keep only last 1000 alerts to prevent file from growing too large
+                if len(alerts) > 1000:
+                    alerts = alerts[-1000:]
+
+                # Write back to file
+                with open(self.dashboard_log_path, 'w', encoding='utf-8') as f:
+                    json.dump(alerts, f, indent=2, ensure_ascii=False)
             
             # Send alert to dashboard
             sender.send(alert_entry)

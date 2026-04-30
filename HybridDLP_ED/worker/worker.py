@@ -444,11 +444,16 @@ class DetectionEngine:
             if is_screenshot_event:
                 return self._process_screenshot_event(event)
 
-            # ==== Xử lý corr_* Events (ưu tiên TRƯỚC clipboard) ====
-            # corr_clipboard_exfil_suspected có chữ 'clipboard' nhưng KHÔNG phải clipboard sensor event
-            # Phải route vào special_event để tránh alert 2 lần
+            # ==== Bỏ qua corr_* Events ====
+            # Các event corr_* do ContextCorrelator sinh ra; không cần xử lý thêm ở detection engine.
             if event_type.startswith('corr_'):
-                return self._process_special_event(event)
+                logger.debug(f"[PID={pid}] Skipping corr_ event: event_id={event_id}, type={event_type}")
+                return True
+
+            # ==== Xử lý Browser Upload Events ====
+            # Phải check TRƯỚC clipboard vì browser_upload có thể có field 'clipboard' trong một số trường hợp.
+            if event_type == 'browser_upload':
+                return self._process_browser_upload_event(event)
 
             # ==== Xử lý Clipboard Events ====
             # Check nếu là clipboard event (clipboard_paste, clipboard_text, etc.)
@@ -480,9 +485,8 @@ class DetectionEngine:
             # Special events that don't have file path but need behavioral rules analysis
             is_special_event = (
                 event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
-                # Network / browser exfil events often don't have a local file path.
+                # Network / exfil events without a local file path (browser_upload đã có handler riêng)
                 or event_type in [
-                    'browser_upload',
                     'http_upload',
                     'file_upload',
                     'network_upload',
@@ -492,8 +496,6 @@ class DetectionEngine:
                     'cloud_exfiltration',
                     'data_exfiltration',
                 ]
-                or event_type.startswith('corr_')
-                or 'tags' in event and any(str(t).startswith('corr_') for t in event.get('tags', []))
             )
 
             if not file_path_str:
@@ -883,7 +885,395 @@ class DetectionEngine:
             self.error_count += 1
             logger.error(f"Error processing event: {e}", exc_info=True)
             return False
-    
+
+    # ------------------------------------------------------------------ #
+    #  BROWSER UPLOAD PIPELINE                                            #
+    # ------------------------------------------------------------------ #
+    def _process_browser_upload_event(self, event: dict) -> bool:
+        """
+        Xử lý browser_upload event với full DLP pipeline.
+
+        Luồng xử lý khi CÓ file local (object.path tồn tại):
+          1. Hash cache check — nếu đã safe → skip
+          2. File stability debounce
+          3a. Ảnh (PNG/JPG/…) → OCR → scan_text_content (như screenshot)
+          3b. File khác       → scan_file + deep_analysis (như file event)
+          4. Behavioral rules
+          5. ML/UEBA anomaly detection
+          6. Risk scoring (tích hợp network upload context)
+          7. Apply filename policy
+          8. Action executor + report + cache update
+
+        Khi KHÔNG có file local:
+          → Metadata-based scoring dựa trên: extension sensitivity,
+            destination domain, upload confidence_score, behavioral rules.
+        """
+        try:
+            event_id  = event.get('event_id', 'unknown')
+            pid       = os.getpid()
+            logger.info(f"[PID={pid}] Processing browser_upload event: event_id={event_id}")
+
+            # --- Trích xuất metadata từ event ---
+            bu          = event.get('browser_upload', {}) or {}
+            obj         = event.get('object', {}) or {}
+            net         = event.get('network', {}) or {}
+            ctx         = event.get('context', {}) or {}
+
+            filename        = str(bu.get('filename') or obj.get('name') or '')
+            dest_domain     = str(bu.get('destination') or net.get('dest_domain') or '')
+            tab_url         = str(bu.get('tab_url') or net.get('dest_url') or '')
+            trigger         = str(bu.get('trigger') or 'unknown')
+            browser         = str(bu.get('browser') or 'unknown')
+            confidence_raw  = bu.get('confidence_score', 0.80)
+            upload_confidence = float(confidence_raw) if confidence_raw is not None else 0.80
+            size_bytes_raw  = obj.get('size') or net.get('bytes_sent_total') or bu.get('size') or 0
+            size_bytes      = int(size_bytes_raw) if size_bytes_raw else 0
+            file_size_mb    = size_bytes / (1024 * 1024) if size_bytes else 0.0
+
+            # Lấy extension — ưu tiên obj.ext rồi mới suy từ filename
+            ext = str(obj.get('ext') or '').lower()
+            if not ext and filename:
+                try:
+                    ext = Path(filename).suffix.lower()
+                except Exception:
+                    ext = ''
+
+            # Resolve local path: object.path → browser_upload.local_path
+            file_path_str = str(obj.get('path') or bu.get('local_path') or '')
+            file_path: Optional[Path] = None
+            if file_path_str:
+                try:
+                    p = Path(file_path_str)
+                    file_path = p if p.exists() else None
+                except Exception:
+                    file_path = None
+
+            # BUG FIX: init tất cả variables trước các if/else blocks để tránh NameError
+            file_hash: str = ''
+            ssdeep_sig: str = ''
+            fn_band: Optional[str] = None
+            actual_size: int = size_bytes  # fallback từ network metadata
+
+            panic_mode = self.queue_consumer.check_panic_mode()
+            if event.get('system', {}).get('panic_mode', False):
+                panic_mode = True
+
+            # ===================================================
+            # PATH A: File tồn tại — full content scan pipeline
+            # ===================================================
+            if file_path is not None:
+                # --- Kiểm tra kích thước ---
+                try:
+                    actual_size = file_path.stat().st_size
+                    file_size_mb = actual_size / (1024 * 1024)
+                    if file_size_mb > WorkerConfig.MAX_FILE_SIZE_MB:
+                        logger.debug(
+                            f"[PID={pid}] browser_upload: file too large, skip content scan: "
+                            f"{file_path.name} ({file_size_mb:.2f}MB)"
+                        )
+                        file_path = None  # Fall through to PATH B
+                except Exception as _e:
+                    logger.warning(f"[PID={pid}] browser_upload: stat failed: {_e}")
+                    file_path = None
+
+            if file_path is not None:
+                # Filename policy band (trước hash cache để tránh bypass whitelist)
+                fn_band = self._filename_policy_band(event, file_path.name)
+                # Đặt fn_band fallback theo filename nếu file_path còn tồn tại
+
+                # --- File stability debounce ---
+                if getattr(WorkerConfig, 'HASH_STABILITY_ENABLED', True):
+                    if not wait_until_file_stable(
+                        file_path,
+                        interval_sec=float(getattr(WorkerConfig, 'FILE_STABILITY_INTERVAL_SEC', 0.15)),
+                        max_wait_sec=float(getattr(WorkerConfig, 'FILE_STABILITY_MAX_WAIT_SEC', 3.0)),
+                    ):
+                        logger.debug(f"[PID={pid}] browser_upload: file not stable, retry later: {file_path}")
+                        return False
+
+                # --- Hash cache check ---
+                file_hash = self.hash_cache.calculate_hash(file_path)
+                if not file_hash:
+                    logger.warning(f"[PID={pid}] browser_upload: hash failed: {file_path}")
+                    file_path = None  # Fallback to PATH B
+                else:
+                    cached = self.hash_cache.get_cached_result(file_hash)
+                    if cached and cached.get('scan_result') == 'safe':
+                        logger.debug(f"[PID={pid}] browser_upload: cached safe: {file_path.name}")
+                        self.processed_count += 1
+                        return True
+
+                    # ssdeep fuzzy cache
+                    ssdeep_sig = ''
+                    if getattr(WorkerConfig, 'SSDEEP_ENABLED', True):
+                        ssdeep_sig = self.hash_cache.calculate_ssdeep(file_path)
+                        if ssdeep_sig:
+                            fuzzy = self.hash_cache.find_fuzzy_safe_match(ssdeep_sig, actual_size)
+                            if fuzzy:
+                                logger.info(
+                                    f"[PID={pid}] browser_upload SSDEEP fuzzy cache hit (safe): "
+                                    f"{file_path.name} score={fuzzy.get('ssdeep_matched_score')}"
+                                )
+                                self.processed_count += 1
+                                return True
+
+            # Re-check nếu file_path bị nulled sau các bước trên
+            if file_path is not None:
+                # ---- Phân nhánh theo loại file ----
+                _image_exts = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.heic', '.heif'}
+                is_image = ext in _image_exts
+
+                if is_image:
+                    # ---- 3a. Ảnh → OCR → scan_text_content ----
+                    ocr_text = ''
+                    if not panic_mode:
+                        logger.info(f"[PID={pid}] browser_upload: OCR on image: {file_path.name}")
+                        try:
+                            extracted = self.deep_analysis.ocr_processor.extract_text(file_path)
+                            if extracted:
+                                ocr_text = extracted.strip()
+                                logger.info(
+                                    f"[PID={pid}] browser_upload OCR: {len(ocr_text)} chars "
+                                    f"from {file_path.name}: {ocr_text[:80]!r}"
+                                )
+                        except Exception as _ocr_err:
+                            logger.warning(f"[PID={pid}] browser_upload OCR error: {_ocr_err}")
+
+                    fast_scan_result = (
+                        self.fast_scan.scan_text_content(ocr_text, panic_mode)
+                        if ocr_text else
+                        {'yara_matches': [], 'is_suspicious': False}
+                    )
+                    deep_analysis_result = {
+                        'is_sensitive': bool(fast_scan_result.get('yara_matches')),
+                        'ocr_text': ocr_text or None,
+                    }
+                else:
+                    # ---- 3b. File khác → scan_file + deep_analysis ----
+                    fast_scan_result = self.fast_scan.scan_file(file_path, panic_mode)
+
+                    yara_matches = fast_scan_result.get('yara_matches', [])
+                    if fast_scan_result.get('is_suspicious', False) and not panic_mode:
+                        high_risk_rules = ['id', 'cmnd', 'cccd', 'credit', 'card']
+                        is_high_risk = any(
+                            any(kw in m.get('rule', '').lower() for kw in high_risk_rules)
+                            for m in yara_matches
+                        )
+                        if is_high_risk:
+                            deep_analysis_result = {'is_sensitive': True}
+                        else:
+                            deep_analysis_result = self.deep_analysis.analyze(
+                                file_path, fast_scan_result.get('file_type'), panic_mode
+                            )
+                    else:
+                        deep_analysis_result = {'is_sensitive': False}
+
+                    # Nếu có text sample từ event → scan thêm (bổ sung YARA hits)
+                    ev_content = event.get('content', {}) or {}
+                    sample_text = str(ev_content.get('sample') or '').strip()
+                    if sample_text:
+                        text_scan = self.fast_scan.scan_text_content(sample_text, panic_mode)
+                        fast_scan_result = self._merge_fast_scan(fast_scan_result, text_scan)
+            else:
+                # ===================================================
+                # PATH B: Không có file — metadata-based scan only
+                # ===================================================
+                # fn_band, file_hash, ssdeep_sig đã được init ở trên
+                if fn_band is None:
+                    fn_band = self._filename_policy_band(event, filename)
+                ocr_text = ''
+                is_image = ext in {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.tif', '.webp', '.heic', '.heif'}
+
+                # Scan filename / extension với YARA (heuristic)
+                scan_target = filename or dest_domain
+                fast_scan_result = (
+                    self.fast_scan.scan_text_content(scan_target, panic_mode)
+                    if scan_target else
+                    {'yara_matches': [], 'is_suspicious': False}
+                )
+                deep_analysis_result = {'is_sensitive': False}
+                logger.info(
+                    f"[PID={pid}] browser_upload: no local file — metadata-only scan "
+                    f"filename={filename!r} dest={dest_domain!r}"
+                )
+
+            yara_matches = fast_scan_result.get('yara_matches', [])
+
+            # ---- 4. Behavioral Rules ----
+            behavioral_matches   = self.behavioral_rules.check_all(event, fast_scan_result)
+            behavioral_risk_boost = 0
+            behavioral_details   = {}
+            if behavioral_matches and fn_band != 'low_medium':
+                highest = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest:
+                    behavioral_risk_boost = WorkerConfig.BEHAVIORAL_RISK_BOOST.get(
+                        highest.get('severity', 'low'), 0
+                    )
+                    behavioral_details = {
+                        'behavioral_rule_matched': highest.get('rule'),
+                        'behavioral_reason':       highest.get('reason', ''),
+                        'behavioral_severity':     highest.get('severity'),
+                        'all_behavioral_matches':  behavioral_matches,
+                    }
+                    logger.warning(
+                        f"Behavioral Rule Matched (BrowserUpload): {highest.get('rule')} "
+                        f"- {highest.get('reason', '')} (+{behavioral_risk_boost})"
+                    )
+
+            # ---- 5. ML / UEBA ----
+            ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
+            if self.ml_analyzer.is_available():
+                try:
+                    recent = self.event_history[-100:] if len(self.event_history) > 100 else self.event_history
+                    ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent)
+                    if ml_anomaly_result.get('is_anomaly', False):
+                        logger.warning(
+                            f"[PID={pid}] UEBA Anomaly (BrowserUpload): "
+                            f"score={ml_anomaly_result.get('anomaly_score', 0):.2f}"
+                        )
+                except Exception as _ml_err:
+                    logger.error(f"[PID={pid}] ML error (browser_upload): {_ml_err}")
+            try:
+                _ml_s = float(ml_anomaly_result.get('anomaly_score') or 0.0)
+                deep_analysis_result['ml_anomaly_score'] = _ml_s
+                deep_analysis_result['ml_is_anomaly']    = bool(ml_anomaly_result.get('is_anomaly', False))
+                deep_analysis_result['anomaly_score']    = max(-1.0, min(1.0, (_ml_s / 5.0) - 1.0))
+            except Exception:
+                pass
+
+            # ---- 6. Risk Scoring ----
+            # Nhận diện sensitive domain để tăng risk tương tự _is_sensitive_external_destination
+            is_sensitive_dest = self._is_sensitive_external_destination(event) or bool(dest_domain)
+
+            event_context = {
+                'action_type':                'browser_upload',
+                'destination':                dest_domain or tab_url,
+                'user':                       ctx.get('user') or event.get('actor', {}).get('user', 'unknown'),
+                'time':                       event.get('ts') or event.get('timestamp', ''),
+                'location':                   str(file_path.parent) if file_path else 'browser',
+                'file_size_mb':               file_size_mb,
+                'process_name':               ctx.get('fg_app') or browser,
+                'active_window':              ctx.get('window_title', ''),
+                'domain':                     dest_domain,
+                'event_id':                   event_id,
+                'source':                     event.get('source', 'browser_upload_sensor'),
+                'severity':                   event.get('severity'),
+                'extension':                  ext,
+                # Upload-specific context
+                'upload_trigger':             trigger,
+                'upload_browser':             browser,
+                'upload_confidence':          upload_confidence,
+                'is_sensitive_external_destination': is_sensitive_dest,
+                # Behavioral / ML
+                'behavioral_risk_boost':      behavioral_risk_boost,
+                'behavioral_details':         behavioral_details,
+                'ml_anomaly_score':           ml_anomaly_result.get('anomaly_score', 0.0),
+                'ml_is_anomaly':              ml_anomaly_result.get('is_anomaly', False),
+                '_event_data':                event,
+            }
+
+            risk_result = self.risk_scoring.calculate_score(
+                fast_scan_result, deep_analysis_result, event_context
+            )
+
+            # Boost từ upload confidence cao (>= 0.85 = browser extension rất chắc là upload nhạy cảm)
+            if upload_confidence >= 0.85 and fn_band != 'low_medium':
+                conf_boost = round((upload_confidence - 0.85) * 20, 2)  # max +3.0
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + conf_boost)
+                risk_result.setdefault('details', {})['upload_confidence_boost'] = conf_boost
+
+            # Apply behavioral boost
+            if behavioral_risk_boost > 0 and fn_band != 'low_medium':
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + behavioral_risk_boost)
+                if 'cvss_score' in risk_result:
+                    risk_result['cvss_score'] = round(min(10.0, risk_result['total_score']), 2)
+                risk_result['details']['behavioral'] = behavioral_details
+                highest = self.behavioral_rules.get_highest_severity_match(behavioral_matches)
+                if highest and highest.get('severity') == 'high':
+                    if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
+                        risk_result['action'] = 'alert'
+
+            self._apply_filename_risk_policy(event, risk_result, fallback_name=filename)
+
+            # ---- 7. Report & Action (với alert dedup tránh spam) ----
+            dummy_path = Path(file_path) if file_path else Path(f"browser_upload://{filename or dest_domain}")
+            report = self.report_generator.generate_report(
+                event, fast_scan_result, deep_analysis_result, risk_result, dummy_path
+            )
+
+            action = risk_result['action']
+
+            # BUG FIX: Alert dedup cho browser_upload — cùng file/domain trong ALERT_DEDUP_SEC → downgrade sang log
+            now_ts = time.time()
+            dedup_sec = float(getattr(WorkerConfig, 'ALERT_DEDUP_SEC', 600))
+            suppress_alert = False
+            if file_hash:
+                dedup_key_bu = file_hash
+            else:
+                dedup_key_bu = f"browser_upload:{filename}:{dest_domain}"
+            if action == 'alert' and dedup_key_bu and dedup_sec > 0:
+                _last_bu = self._alert_dedup.get(dedup_key_bu)
+                if _last_bu is not None and (now_ts - _last_bu) < dedup_sec:
+                    suppress_alert = True
+                    logger.warning(
+                        f"[PID={pid}] BrowserUpload alert dedup: same key within {dedup_sec}s → log "
+                        f"key={str(dedup_key_bu)[:48]}…"
+                    )
+            exec_action_bu = 'log' if suppress_alert else action
+            if action == 'alert' and not suppress_alert:
+                self._alert_dedup[dedup_key_bu] = now_ts
+
+            logger.info(
+                f"[PID={pid}] BrowserUpload scan complete: event_id={event_id} "
+                f"file={filename!r} dest={dest_domain!r} "
+                f"score={risk_result['total_score']:.1f} action={exec_action_bu.upper()} "
+                f"yara={len(yara_matches)} has_file={file_path is not None}"
+                + (f" (policy={action.upper()}, dedup)" if suppress_alert else "")
+            )
+
+            self.action_executor.execute(
+                exec_action_bu, dummy_path,
+                risk_result['total_score'], risk_result['details'],
+                event_context, report
+            )
+
+            # ---- 8. Cache update (chỉ khi có file) ----
+            if file_path is not None and file_hash:
+                scan_result_label = (
+                    'malicious' if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']
+                    else 'safe'
+                )
+                if not ssdeep_sig and getattr(WorkerConfig, 'SSDEEP_ENABLED', True):
+                    ssdeep_sig = self.hash_cache.calculate_ssdeep(file_path)
+                self.hash_cache.save_result(
+                    file_hash, str(file_path), file_path.stat().st_size,
+                    scan_result_label, risk_result['total_score'], action,
+                    ssdeep_sig=ssdeep_sig,
+                )
+                try:
+                    self._pqueue.insert_scan_result(
+                        event_ref=str(event_id),
+                        file_hash=file_hash,
+                        risk_score=float(risk_result['total_score']),
+                        scan_summary=scan_result_label,
+                        payload={'action': action, 'path': str(file_path)},
+                    )
+                except Exception:
+                    pass
+
+            self.event_history.append(event.copy())
+            if len(self.event_history) > self.max_history_size:
+                self.event_history.pop(0)
+
+            self._save_processed_event(event, risk_result, fast_scan_result, behavioral_matches)
+            self.processed_count += 1
+            return True
+
+        except Exception as e:
+            self.error_count += 1
+            logger.error(f"Error processing browser_upload event: {e}", exc_info=True)
+            return False
+
     def _process_clipboard_event(self, event: dict) -> bool:
         """
         Xử lý clipboard event (paste, copy)
@@ -1084,10 +1474,10 @@ class DetectionEngine:
                 pass
 
             # 4. Risk Scoring với context đặc biệt cho clipboard
+            # BUG FIX: Không redeclare raw_clipboard (đã khai báo ở line ~1265) để tránh variable shadowing
             ctx = event.get('context', {}) or {}
             raw_ctx = raw_original.get('context', {}) or {}
             operation = event.get('operation', {}) or {}
-            raw_clipboard = raw_original.get('clipboard', {}) or {}
             
             window_title = (
                 ctx.get('window_title') or                    
@@ -1196,9 +1586,14 @@ class DetectionEngine:
             )
             
             self._save_processed_event(event, risk_result, fast_scan_result, behavioral_matches)
-            
+
+            # BUG FIX: Clipboard events cũng cần vào event_history để ML/UEBA có context
+            self.event_history.append(event.copy())
+            if len(self.event_history) > self.max_history_size:
+                self.event_history.pop(0)
+
             self.processed_count += 1
-            
+
             logger.info(
                 f"[PID={pid}] Processed Clipboard: "
                 f"event_id={event_id}, {len(text_content)} chars | "
@@ -1207,7 +1602,7 @@ class DetectionEngine:
                 f"App: {window_title[:30]} | "
                 f"YARA: {len(fast_scan_result.get('yara_matches', []))}"
             )
-            
+
             return True
             
         except Exception as e:
@@ -1430,7 +1825,10 @@ class DetectionEngine:
 
     def _process_special_event(self, event: dict) -> bool:
         """
-        Xử lý các event đặc biệt không có file (proc_start, usb_connected, print_job, corr_*)
+        Xử lý các event đặc biệt không có file path:
+        proc_start, proc_end, usb_connected/mounted/unmounted, print_job,
+        và các network events (http_upload, network_flow, v.v.)
+        Lưu ý: corr_* events đã bị skip sớm tại process_event(), không vào đây.
         """
         try:
             event_id = event.get('event_id', 'unknown')
@@ -1528,19 +1926,14 @@ class DetectionEngine:
                     if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
                         risk_result['action'] = 'alert'
                         
-            # Cố định điểm tối thiểu cho corr_* event (chỉ boost nếu còn thấp)
-            if event_type.startswith('corr_') and risk_result['total_score'] < 5.0:
-                risk_result['total_score'] = 7.5
-                risk_result['action'] = 'alert'
-
             # Dedup alert theo event_id để tránh double-alert khi cùng event bị process nhiều lần
             if risk_result.get('action') == 'alert':
-                _dedup_key = f"corr_alert:{event_id}"
+                _dedup_key = f"special_alert:{event_id}"
                 _now_ts = time.time()
                 _last_alert = self._alert_dedup.get(_dedup_key)
                 if _last_alert is not None and (_now_ts - _last_alert) < 30.0:
                     logger.warning(
-                        f"[PID={pid}] Dedup corr alert suppressed (within 30s): event_id={event_id}, type={event_type}"
+                        f"[PID={pid}] Dedup special alert suppressed (within 30s): event_id={event_id}, type={event_type}"
                     )
                     risk_result['action'] = 'log'
                 else:

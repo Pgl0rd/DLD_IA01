@@ -510,7 +510,17 @@ def _evt_content_type_inferred_only(evt: Dict[str, Any]) -> Optional[bool]:
     return None
 
 
+# Hard-coded: Counter cho screenshot/browser paste để đẩy risk score 9.3
+# Set = "1" để chỉ chạy hardcoded rule, disable tất cả correlation khác
+_HARDCODE_ONLY_MODE = os.getenv("HYBRIDDLP_HARDCODE_ONLY", "1").strip().lower() in {"1", "true", "yes", "on"}
+
 class ContextCorrelator:
+    # Hard-coded: Counter cho screenshot/browser paste để đẩy risk score 9.3
+    _screenshot_browser_count: int = 0
+    _screenshot_browser_user: str = ""
+    _screenshot_browser_window_sec: float = 3600.0  # Reset sau 1 giờ
+    _screenshot_browser_last_ts: float = 0.0
+
     def __init__(
         self,
         usb_window_sec: float = 180.0,
@@ -533,6 +543,12 @@ class ContextCorrelator:
         self._clipboard_recent: Deque[Dict[str, Any]] = deque()
         self._recent_corr_keys: Deque[Tuple[float, str]] = deque()
         self._clipboard_usb = ClipboardUsbMatcher(dedupe_fn=lambda k, t: self._dedupe_ok(k, t))
+
+        # Counter cho screenshot/browser paste hard-coded rule
+        self._scr_browser_count: int = 0
+        self._scr_browser_user: str = ""
+        self._scr_browser_last_ts: float = 0.0
+        self._scr_browser_window_sec: float = 3600.0  # 1 hour window
 
         _default_noise = (
             "\\windows\\",
@@ -713,6 +729,105 @@ class ContextCorrelator:
         if any(h in title for h in SENSITIVE_TITLE_HINTS):
             return True
         return False
+
+    def _is_browser_paste_event(self, evt: Dict[str, Any]) -> bool:
+        """Check if event is a clipboard paste into a browser."""
+        etype = _evt_type(evt)
+        if etype != "clipboard_paste":
+            return False
+        
+        dest_app = _evt_clipboard_dest_app(evt)
+        dest_domain = _evt_dest_domain(evt)
+        
+        # Check dest_app is a browser
+        dest_app_lower = dest_app.lower() if dest_app else ""
+        if any(browser in dest_app_lower for browser in BROWSER_PROCS):
+            return True
+        
+        # Check dest_domain looks like browser URL (google, chatgpt, etc.)
+        if dest_domain:
+            browser_domains = {"google", "chatgpt", "claude", "gemini", "bard", "copilot", 
+                             "perplexity", "openai", "anthropic", "microsoft", "bing",
+                             "facebook", "twitter", "instagram", "linkedin", "reddit",
+                             "youtube", "dropbox", "onedrive", "mega", "box"}
+            if any(h in dest_domain.lower() for h in browser_domains):
+                return True
+        
+        return False
+
+    def _check_screenshot_browser_count(self, evt: Dict[str, Any], now_unix: float) -> Optional[Dict[str, Any]]:
+        """
+        Hard-coded rule: Nếu user screenshot hoặc paste vào browser >= 10 lần trong 1 giờ
+        → Đẩy risk score lên 9.3 (Critical)
+        """
+        etype = _evt_type(evt)
+        
+        # Check if this is a screenshot or browser paste
+        is_screenshot = etype == "screenshot"
+        is_browser_paste = self._is_browser_paste_event(evt)
+        
+        if not (is_screenshot or is_browser_paste):
+            return None
+        
+        # Get user
+        user = _evt_actor_user(evt) or "unknown"
+        
+        # Reset counter nếu window đã hết hoặc user khác
+        if now_unix - self._scr_browser_last_ts > self._scr_browser_window_sec:
+            self._scr_browser_count = 0
+            self._scr_browser_user = user
+        
+        # Reset nếu user khác
+        if user != self._scr_browser_user:
+            self._scr_browser_count = 0
+            self._scr_browser_user = user
+        
+        # Tăng counter
+        self._scr_browser_count += 1
+        self._scr_browser_last_ts = now_unix
+        
+        event_desc = "Screenshot capture" if is_screenshot else "Browser paste"
+        self._dbg(f"[HardCode Rule] {event_desc} #{self._scr_browser_count}/10 by {user}")
+        
+        # Nếu đến lần thứ 10
+        if self._scr_browser_count >= 10:
+            corr_raw = {
+                "type": "corr_screenshot_browser_excessive",
+                "source": "correlator",
+                "severity": _sev("critical"),
+                "ts": _iso_from_ts(now_unix),
+                "tags": ["corr_screenshot_browser", "excessive_activity", "hardcoded_rule"],
+                "actor": self._build_actor(evt),
+                "context": self._build_context(evt),
+                "object": {
+                    "path": None,
+                    "dst_path": None,
+                    "drive": None,
+                    "volume_type": None,
+                    "sensitivity": "Sensitive",
+                },
+                "debug": {
+                    "evidence": {
+                        "hardcoded_rule": True,
+                        "rule_description": "Screenshot/Browser paste >= 10 times in 1 hour",
+                        "screenshot_count": self._scr_browser_count if is_screenshot else 0,
+                        "browser_paste_count": self._scr_browser_count if is_browser_paste else 0,
+                        "user": user,
+                        "event_type": etype,
+                        "window_title": _evt_window_title(evt),
+                        "dest_app": _evt_clipboard_dest_app(evt),
+                        "dest_domain": _evt_dest_domain(evt),
+                    },
+                    "hardcoded_risk_score": 9.3,
+                    "hardcoded_risk_level": "critical",
+                    "rule_trigger": "screenshot_browser_excessive_10times_1hour",
+                },
+            }
+            # Reset counter sau khi trigger
+            self._scr_browser_count = 0
+            return corr_raw
+        
+        return None
 
     def _classify_network_target(self, evt: Dict[str, Any]) -> Dict[str, Any]:
         dest_domain = _evt_dest_domain(evt)
@@ -943,6 +1058,22 @@ class ContextCorrelator:
             if self._is_noise_event(evt):
                 return out
 
+            # HARDCODE ONLY MODE: Skip all other correlations, only process hardcoded rule
+            if _HARDCODE_ONLY_MODE:
+                # Check screenshot event
+                if etype == "screenshot":
+                    hardcoded_corr = self._check_screenshot_browser_count(evt, now_unix)
+                    if hardcoded_corr:
+                        out.append(self._make_corr(hardcoded_corr, now_unix))
+                
+                # Check browser paste event
+                if etype == "clipboard_paste":
+                    hardcoded_corr = self._check_screenshot_browser_count(evt, now_unix)
+                    if hardcoded_corr:
+                        out.append(self._make_corr(hardcoded_corr, now_unix))
+                
+                return out
+
             self._trim(self._staging_recent, self.staging_window_sec, now_unix)
             self._trim(self._network_recent, 120.0, now_unix)
             self._trim(self._clipboard_recent, self.clip_window_sec, now_unix)
@@ -1098,6 +1229,20 @@ class ContextCorrelator:
                     self._clipboard_usb.record_clipboard_copy(evt, now_unix)
                 except Exception:
                     pass
+
+            # ===== HARD-CODED RULE: Screenshot/Browser Paste Counter =====
+            # Check screenshot event
+            if etype == "screenshot":
+                hardcoded_corr = self._check_screenshot_browser_count(evt, now_unix)
+                if hardcoded_corr:
+                    out.append(self._make_corr(hardcoded_corr, now_unix))
+            
+            # Check browser paste event
+            if etype == "clipboard_paste":
+                hardcoded_corr = self._check_screenshot_browser_count(evt, now_unix)
+                if hardcoded_corr:
+                    out.append(self._make_corr(hardcoded_corr, now_unix))
+            # ===== END HARD-CODED RULE =====
 
             if etype in (
                 "net_flow_violation",
@@ -1431,7 +1576,14 @@ class ContextCorrelator:
 
                 looks_sensitive = strong_sensitive or bulk_or_structured
 
-                if looks_sensitive and self._is_sensitive_app_context(ctx, evt):
+                # Toggle: disable corr_clipboard_exfil_suspected via env
+                ENABLE_CLIPBOARD_EXFIL_CORR = os.getenv(
+                    "HYBRIDDLP_ENABLE_CLIPBOARD_EXFIL_CORR", "1"
+                ).strip().lower() in {"1", "true", "yes", "on"}
+
+                if (looks_sensitive and
+                    ENABLE_CLIPBOARD_EXFIL_CORR and
+                    self._is_sensitive_app_context(ctx, evt)):
                     key = f"clip_exfil:{dest_domain}:{dest_app}:{length}:{snapshot_linked}"
                     if self._dedupe_ok(key, now_unix):
                         corr_raw = {

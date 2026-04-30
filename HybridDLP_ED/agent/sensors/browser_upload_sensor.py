@@ -13,6 +13,12 @@ try:
 except Exception:
     ContextProvider = None  # type: ignore
 
+# Extension nhớm như ảnh — resolve vào Pictures\Screenshots
+_IMAGE_EXTENSIONS: frozenset = frozenset({
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp",
+    ".tiff", ".tif", ".webp", ".heic", ".heif",
+})
+
 
 class BrowserUploadSensor:
     """
@@ -101,6 +107,32 @@ class BrowserUploadSensor:
         except Exception:
             return None
 
+    @staticmethod
+    def _resolve_local_path(filename: str) -> Optional[str]:
+        """
+        Resolve full path từ filename khi extension không gửi local_path.
+
+        Quy tắc:
+          - Ảnh (.png, .jpg, …) → Pictures\\Screenshots
+          - Các loại khác       → Downloads
+
+        Chỉ trả về path nếu file thực sự tồn tại; nếu không trả về None.
+        """
+        if not filename:
+            return None
+        try:
+            stem = Path(filename).name  # giữ nguyên tên (kể cả sub-path)
+            ext = Path(filename).suffix.lower()
+            home = Path.home()
+            if ext in _IMAGE_EXTENSIONS:
+                base_dir = home / "Pictures" / "Screenshots"
+            else:
+                base_dir = home / "Downloads"
+            candidate = base_dir / stem
+            return str(candidate) if candidate.exists() else None
+        except Exception:
+            return None
+
     def _build_event(self, msg: Dict[str, Any], ctx_snapshot: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         if not isinstance(msg, dict):
             return None
@@ -131,6 +163,10 @@ class BrowserUploadSensor:
         # If extension provides local_path, set it to object.path so correlator/rules can use it.
         local_path = msg.get("local_path") or msg.get("path") or None
         local_path = str(local_path) if local_path else None
+
+        # Nếu không có local_path nhưng có filename, thử resolve từ các folder mặc định.
+        if not local_path and filename:
+            local_path = self._resolve_local_path(filename)
 
         ext = None
         if local_path:

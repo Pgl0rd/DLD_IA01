@@ -711,7 +711,7 @@ class NetworkUploadRule(BehavioralRule):
         is_sensitive_label = any(k in sensitivity for k in ["sensitive", "confidential", "highly"])
         is_sensitive_ext = ext in sensitive_exts
         is_corr_source = evt_type in {
-            "corr_suspected_upload",
+            # corr_suspected_upload đã bị skip ở worker process_event() — không có mặt ở đây
             "cloud_exfiltration",
             "http_upload",
             "data_exfiltration",

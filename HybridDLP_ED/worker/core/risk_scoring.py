@@ -84,12 +84,20 @@ class RiskScoringEngine:
         self.method = WorkerConfig.RISK_SCORING_METHOD
         self.research_engine = ResearchBasedRiskScoringEngine() if self.method == 'research_based' else None
         self.nist_engine = NISTBasedRiskScoringEngine() if self.method == 'nist_based' else None
+        self._debug = getattr(WorkerConfig, "DEBUG", False)
         logger.info(
             "Risk policy loaded: method=%s, composite=%s, alert_threshold=%s (thang 0–10)",
             self.method,
             WorkerConfig.RISK_COMPOSITE_MODEL,
             self.thresholds.get("alert"),
         )
+    
+    def _dbg(self, *args) -> None:
+        if self._debug:
+            try:
+                print("[RiskScoringEngine]", *args)
+            except Exception:
+                pass
     
     def calculate_score(self, 
                        fast_scan_result: Dict[str, Any],
@@ -113,6 +121,35 @@ class RiskScoringEngine:
                 'details': {...}
             }
         """
+        # Hard-coded rule override: Screenshot/Browser paste >= 10 times
+        # Event data nằm trong _event_data (worker.py _process_special_event line 1510)
+        event_data = event_context.get("_event_data", {})
+        debug_info = event_data.get("debug", {})
+        hardcoded_rule = debug_info.get("hardcoded_rule", False)
+        hardcoded_risk = debug_info.get("hardcoded_risk_score")
+        
+        if hardcoded_rule and hardcoded_risk is not None:
+            hardcoded_score = float(hardcoded_risk)
+            self._dbg(f"[HardCode Rule Override] Risk score forced to {hardcoded_score}")
+            evidence = debug_info.get("evidence", {})
+            return {
+                'total_score': round(hardcoded_score, 2),
+                'cvss_score': round(hardcoded_score, 1),
+                'content_score': 0,
+                'behavior_score': 0,
+                'context_score': 0,
+                'action': 'alert',
+                'risk_level': 'critical',
+                'details': {
+                    'hardcoded_rule': True,
+                    'rule_description': evidence.get("rule_description", ""),
+                    'screenshot_count': evidence.get("screenshot_count", 0),
+                    'browser_paste_count': evidence.get("browser_paste_count", 0),
+                    'user': evidence.get("user", "unknown"),
+                },
+                'method': 'hardcoded_override',
+            }
+        
         # CVSS-inspired DLP (Noteupdate.txt)
         if str(self.method).lower() == 'cvss_dlp':
             from core.cvss_dlp_orchestrator import CVSSDLPScoringEngine

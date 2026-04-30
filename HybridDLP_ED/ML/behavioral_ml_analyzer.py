@@ -421,7 +421,7 @@ class BehavioralMLAnalyzer:
         if profile_score >= 2.0:
             incremental += min(0.6, profile_score / 10.0)
 
-        value = min(6.0, value + incremental)  # Cap increased to allow fragmented exfil to raise error
+        value = min(6.0, value + incremental)  # Cap tại 6.0 để cho phép fragmented exfil tích lũy đủ để trigger alert (previous cap: 3.0)
 
         self._accumulator[user] = {"value": value, "ts": ts.timestamp()}
         return value
