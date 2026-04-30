@@ -124,12 +124,26 @@ class BrowserUploadSensor:
             stem = Path(filename).name  # giữ nguyên tên (kể cả sub-path)
             ext = Path(filename).suffix.lower()
             home = Path.home()
+
+            # Smart resolve: try multiple candidate locations
+            candidates = []
             if ext in _IMAGE_EXTENSIONS:
-                base_dir = home / "Pictures" / "Screenshots"
+                candidates.append(home / "Pictures" / "Screenshots" / stem)
+                candidates.append(home / "Downloads" / stem)
+                candidates.append(home / "Pictures" / stem)
             else:
-                base_dir = home / "Downloads"
-            candidate = base_dir / stem
-            return str(candidate) if candidate.exists() else None
+                candidates.append(home / "Downloads" / stem)
+                candidates.append(home / "Documents" / stem)
+                candidates.append(home / "Desktop" / stem)
+
+            for candidate in candidates:
+                if candidate.exists():
+                    return str(candidate)
+
+            # Fallback to the strict requested rule if file is not found
+            if ext in _IMAGE_EXTENSIONS:
+                return str(home / "Pictures" / "Screenshots" / stem)
+            return str(home / "Downloads" / stem)
         except Exception:
             return None
 

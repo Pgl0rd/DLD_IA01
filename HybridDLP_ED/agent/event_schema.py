@@ -384,6 +384,17 @@ def empty_event() -> Dict[str, Any]:
             "session_duration_sec": None,
         },
 
+        "browser_upload": {
+            "filename": None,
+            "size": None,
+            "tab_url": None,
+            "destination": None,
+            "trigger": None,
+            "browser": None,
+            "confidence_score": None,
+            "local_path": None,
+        },
+
         "decision": {
             "stage": "L1",
             "action": None,
@@ -455,6 +466,7 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
     usb = ensure_dict(raw.get("usb"))
     prn = ensure_dict(raw.get("print"))
     net = ensure_dict(raw.get("network"))
+    browser_upload = ensure_dict(raw.get("browser_upload"))
 
     decision = ensure_dict(raw.get("decision"))
     debug = ensure_dict(raw.get("debug"))
@@ -726,6 +738,18 @@ def normalize_event(raw: Dict[str, Any]) -> Dict[str, Any]:
         "session_first_ts": net.get("session_first_ts"),
         "session_last_ts": net.get("session_last_ts"),
         "session_duration_sec": first_non_empty(net.get("session_duration_sec"), metrics.get("session_duration_sec")),
+    })
+
+    # browser_upload bucket
+    e["browser_upload"].update({
+        "filename": browser_upload.get("filename"),
+        "size": browser_upload.get("size"),
+        "tab_url": browser_upload.get("tab_url"),
+        "destination": browser_upload.get("destination"),
+        "trigger": browser_upload.get("trigger"),
+        "browser": browser_upload.get("browser"),
+        "confidence_score": browser_upload.get("confidence_score"),
+        "local_path": browser_upload.get("local_path"),
     })
 
     # decision/debug

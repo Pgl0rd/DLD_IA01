@@ -230,6 +230,7 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
     decision0 = evt.get("decision") if isinstance(evt.get("decision"), dict) else {}
     debug0 = evt.get("debug") if isinstance(evt.get("debug"), dict) else {}
     process0 = evt.get("process") if isinstance(evt.get("process"), dict) else {}
+    browser_upload0 = evt.get("browser_upload") if isinstance(evt.get("browser_upload"), dict) else {}
 
     raw_envelope = {
         "type": etype,
@@ -288,6 +289,7 @@ def canonicalize_event(evt: Dict[str, Any]) -> Dict[str, Any]:
         "screenshot": screenshot0,
         "usb": usb0,
         "print": print0,
+        "browser_upload": browser_upload0,
         "network": {
             **network0,
             "dest_domain": _first_non_empty(
