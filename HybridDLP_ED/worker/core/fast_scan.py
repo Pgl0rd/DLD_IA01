@@ -90,13 +90,15 @@ class FastScanEngine:
         else:
             self.mime = None
     
-    def scan_file(self, file_path: Path, panic_mode: bool = False) -> Dict[str, Any]:
+    def scan_file(self, file_path: Path, panic_mode: bool = False, force_extract: bool = False) -> Dict[str, Any]:
         """
         Scan file với YARA và Header Check
         
         Args:
             file_path: Đường dẫn file cần scan
             panic_mode: Nếu True, chỉ chạy YARA nhanh, skip các check phức tạp
+            force_extract: Nếu True, bắt buộc bóc text + YARA trên nội dung
+                           (dùng cho external transfer >= ngưỡng kích thước)
         
         Returns:
             {
@@ -158,23 +160,25 @@ class FastScanEngine:
                     result['is_suspicious'] = True
                     logger.warning(f"Encrypted ZIP detected: {file_path.name}")
                 
-                # 4. Text Extraction for YARA Scan on compressed/document formats
-                if detected.group in ['docx', 'xlsx', 'pdf', 'text', 'image']:
+                # 4. Text Extraction + YARA on text content
+                # Chạy nếu: file thuộc nhóm tài liệu/ảnh, HOẶC force_extract=True (external transfer >= ngưỡng KB)
+                should_extract = detected.group in ['docx', 'xlsx', 'pdf', 'text', 'image'] or force_extract
+                if should_extract:
                     try:
                         extraction = self.content_processor.extract_content(file_path, detected)
                         text_to_scan = extraction.text if extraction.text else ""
                         
                         # Perform OCR if needed (e.g., images or short PDFs)
-                        if extraction.needs_ocr and not panic_mode:
+                        if extraction.needs_ocr:
                             ocr_text = self.ocr_processor.extract_text(file_path)
                             if ocr_text:
                                 text_to_scan += "\n" + ocr_text
 
                         if text_to_scan and text_to_scan.strip():
-                            # Run fast text scan (panic_mode=True to ensure it's quick and doesn't recurse)
+                            # Run YARA trên text đã bóc
                             text_scan_result = self.scan_text_content(text_to_scan, panic_mode=True)
                             
-                            # Merge YARA matches
+                            # Merge YARA matches (deduplicate by rule name)
                             new_matches = text_scan_result.get('yara_matches', [])
                             if new_matches:
                                 existing_rules = {m['rule'] for m in result['yara_matches']}
@@ -185,9 +189,13 @@ class FastScanEngine:
                                         
                                 result['is_suspicious'] = True
                                 logger.debug(f"YARA match via text extraction in {file_path.name}: {[m['rule'] for m in new_matches]}")
+                        
+                        if force_extract:
+                            result['force_extract_applied'] = True
                     except Exception as e:
                         logger.warning(f"Failed to extract text for fast scan on {file_path.name}: {e}")
-            
+        
+    
             result['scan_time_ms'] = (time.time() - start_time) * 1000
             
         except Exception as e:

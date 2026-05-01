@@ -576,10 +576,21 @@ class DetectionEngine:
                         return True
             
             # 3. Fast Scan (file content)
-            fast_scan_result = self.fast_scan.scan_file(file_path, panic_mode)
+            # Nếu là external transfer + file >= FORCE_SCAN_MIN_KB → bắt buộc bóc nội dung tại tầng fast scan
+            FORCE_SCAN_MIN_KB = 50
+            force_extract = (
+                not panic_mode
+                and file_size_mb >= (FORCE_SCAN_MIN_KB / 1024)
+                and self._is_external_transfer_event(event)
+            )
+            if force_extract:
+                logger.debug(
+                    "External transfer >%dKB – force_extract=True for %s (%.1fKB)",
+                    FORCE_SCAN_MIN_KB, file_path.name, file_size_mb * 1024
+                )
+            fast_scan_result = self.fast_scan.scan_file(file_path, panic_mode, force_extract=force_extract)
 
-            # For USB/network copy events, also scan event text sample (if available),
-            # because some file signatures can be generic (e.g., csv detected as bin).
+            # Nếu có sample text trong event (ví dụ CSV trông như bin) → quét thêm
             if self._is_external_transfer_event(event):
                 ev_content = event.get("content", {}) or {}
                 sample_text = str(ev_content.get("sample") or "").strip()
@@ -606,7 +617,7 @@ class DetectionEngine:
             )
             if bulk_force_deep:
                 logger.warning(
-                    "Bulk exfiltration trigger: off_hours=%s sensitive_external=%s files=%s total_mb=%s window_sec=%s → force DeepAnalysis/ML scan",
+                    "Bulk exfiltration trigger: off_hours=%s sensitive_external=%s files=%s total_mb=%s window_sec=%s",
                     is_off_hours,
                     is_sensitive_external,
                     bulk_feats.get("bulk_file_count_window"),
@@ -614,43 +625,26 @@ class DetectionEngine:
                     bulk_feats.get("bulk_window_sec"),
                 )
 
-            # Bắt buộc scan nội dung nếu file > 30KB và là event chuyển file ra thiết bị ngoại vi.
-            # Không phụ thuộc vào YARA raw bytes hay ngưỡng bulk.
-            FORCE_SCAN_MIN_KB = 30
-            force_content_scan = (
-                not panic_mode
-                and file_size_mb >= (FORCE_SCAN_MIN_KB / 1024)
-                and self._is_external_transfer_event(event)
-            )
-            if force_content_scan:
-                logger.debug(
-                    "External transfer >%dKB – forcing content scan for %s (%.1fKB)",
-                    FORCE_SCAN_MIN_KB, file_path.name, file_size_mb * 1024
-                )
-
-            # 4. Decision Point
-            if fast_scan_result.get('is_suspicious', False) or bulk_force_deep or force_content_scan:
+            # 4. Decision Point — fast_scan đã xử lý toàn bộ text extraction + YARA.
+            #    Decision ở đây chỉ dựa vào kết quả is_suspicious từ fast_scan.
+            if fast_scan_result.get('is_suspicious', False) or bulk_force_deep:
                 # Nếu YARA phát hiện ngay với high confidence → có thể skip deep analysis
-                if yara_matches and not panic_mode and not bulk_force_deep and not force_content_scan:
+                if yara_matches and not panic_mode and not bulk_force_deep:
                     # Check nếu là high-risk rule (ID, credit card)
                     high_risk_rules = ['id', 'cmnd', 'cccd', 'credit', 'card']
                     is_high_risk = any(
                         any(keyword in match.get('rule', '').lower() for keyword in high_risk_rules)
                         for match in yara_matches
                     )
-                    
                     if is_high_risk:
-                        # High risk từ YARA → skip deep analysis để nhanh
                         deep_analysis_result = {'is_sensitive': True}
                     else:
-                        # 5. Deep Analysis (nếu không panic mode)
                         deep_analysis_result = self.deep_analysis.analyze(
                             file_path,
                             fast_scan_result.get('file_type'),
                             panic_mode
                         )
                 else:
-                    # force_content_scan hoặc bulk_force_deep → chạy full deep analysis
                     if not panic_mode:
                         deep_analysis_result = self.deep_analysis.analyze(
                             file_path,
@@ -659,12 +653,9 @@ class DetectionEngine:
                         )
                         if bulk_force_deep:
                             deep_analysis_result["bulk_triggered_deep_scan"] = True
-                        if force_content_scan:
-                            deep_analysis_result["forced_content_scan"] = True
                     else:
                         deep_analysis_result = {'is_sensitive': False}
             else:
-                # Safe từ fast scan, không phải external transfer → skip deep analysis
                 deep_analysis_result = {'is_sensitive': False}
 
             
