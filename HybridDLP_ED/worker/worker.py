@@ -548,14 +548,16 @@ class DetectionEngine:
                 return False
             
             cached_result = self.hash_cache.get_cached_result(file_hash)
+            cached_malicious_score = None
             if cached_result:
                 scan_result = cached_result.get('scan_result', '')
                 if scan_result == 'safe':
                     logger.debug(f"File cached as safe: {file_path.name}")
                     self.processed_count += 1
                     return True
-                # Nếu cached là malicious, vẫn cần check lại (có thể policy thay đổi)
-
+                elif scan_result == 'malicious':
+                    cached_malicious_score = float(cached_result.get('risk_score', 10.0))
+                    logger.info(f"File cached as malicious: {file_path.name}, keeping cached risk score: {cached_malicious_score}")
             # Tên file trong whitelist demo: không ép điểm từ force_max / behavioral (xem _apply_filename_risk_policy).
             fn_band = self._filename_policy_band(event, file_path.name)
 
@@ -776,12 +778,25 @@ class DetectionEngine:
                 ),
                 '_event_data': event
             }
+            if cached_malicious_score is not None:
+                event_context['cached_malicious_score'] = cached_malicious_score
             
             risk_result = self.risk_scoring.calculate_score(
                 fast_scan_result,
                 deep_analysis_result,
                 event_context
             )
+
+            # Apply cached malicious score if it was previously detected as malicious
+            if cached_malicious_score is not None:
+                if risk_result['total_score'] < cached_malicious_score:
+                    risk_result['total_score'] = cached_malicious_score
+                    if "cvss_score" in risk_result:
+                        risk_result["cvss_score"] = round(min(10.0, cached_malicious_score), 2)
+                    risk_result.setdefault('details', {})['cache_override'] = f"Retained previous malicious score: {cached_malicious_score}"
+                    logger.warning(f"Overriding calculated risk score with cached malicious score: {cached_malicious_score}")
+                    if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
+                        risk_result['action'] = 'alert'
 
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0 and fn_band != "low_medium":
@@ -993,15 +1008,21 @@ class DetectionEngine:
 
                 # --- Hash cache check ---
                 file_hash = self.hash_cache.calculate_hash(file_path)
+                cached_malicious_score = None
                 if not file_hash:
                     logger.warning(f"[PID={pid}] browser_upload: hash failed: {file_path}")
                     file_path = None  # Fallback to PATH B
                 else:
                     cached = self.hash_cache.get_cached_result(file_hash)
-                    if cached and cached.get('scan_result') == 'safe':
-                        logger.debug(f"[PID={pid}] browser_upload: cached safe: {file_path.name}")
-                        self.processed_count += 1
-                        return True
+                    if cached:
+                        scan_result = cached.get('scan_result', '')
+                        if scan_result == 'safe':
+                            logger.debug(f"[PID={pid}] browser_upload: cached safe: {file_path.name}")
+                            self.processed_count += 1
+                            return True
+                        elif scan_result == 'malicious':
+                            cached_malicious_score = float(cached.get('risk_score', 10.0))
+                            logger.info(f"[PID={pid}] browser_upload: cached malicious: {file_path.name}, keeping cached risk score: {cached_malicious_score}")
 
                     # ssdeep fuzzy cache
                     ssdeep_sig = ''
@@ -1175,6 +1196,17 @@ class DetectionEngine:
             risk_result = self.risk_scoring.calculate_score(
                 fast_scan_result, deep_analysis_result, event_context
             )
+
+            # Apply cached malicious score if it was previously detected as malicious
+            if cached_malicious_score is not None:
+                if risk_result['total_score'] < cached_malicious_score:
+                    risk_result['total_score'] = cached_malicious_score
+                    if "cvss_score" in risk_result:
+                        risk_result["cvss_score"] = round(min(10.0, cached_malicious_score), 2)
+                    risk_result.setdefault('details', {})['cache_override'] = f"Retained previous malicious score: {cached_malicious_score}"
+                    logger.warning(f"Overriding calculated risk score with cached malicious score: {cached_malicious_score}")
+                    if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
+                        risk_result['action'] = 'alert'
 
             # Boost từ upload confidence cao (>= 0.85 = browser extension rất chắc là upload nhạy cảm)
             if upload_confidence >= 0.85 and fn_band != 'low_medium':

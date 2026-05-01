@@ -10,6 +10,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import WorkerConfig
 from core.content_pipeline import ContentProcessor
+from core.deep_analysis import OCRProcessor
 
 try:
     import magic
@@ -26,6 +27,7 @@ class FastScanEngine:
         self.yara_rules = None
         self.mime = None
         self.content_processor = ContentProcessor(max_text_length=WorkerConfig.ML_MAX_TEXT_LENGTH)
+        self.ocr_processor = OCRProcessor()
         self._load_yara_rules()
         self._init_file_type_detection()
     
@@ -155,6 +157,36 @@ class FastScanEngine:
                 if result['is_encrypted_zip']:
                     result['is_suspicious'] = True
                     logger.warning(f"Encrypted ZIP detected: {file_path.name}")
+                
+                # 4. Text Extraction for YARA Scan on compressed/document formats
+                if detected.group in ['docx', 'xlsx', 'pdf', 'text', 'image']:
+                    try:
+                        extraction = self.content_processor.extract_content(file_path, detected)
+                        text_to_scan = extraction.text if extraction.text else ""
+                        
+                        # Perform OCR if needed (e.g., images or short PDFs)
+                        if extraction.needs_ocr and not panic_mode:
+                            ocr_text = self.ocr_processor.extract_text(file_path)
+                            if ocr_text:
+                                text_to_scan += "\n" + ocr_text
+
+                        if text_to_scan and text_to_scan.strip():
+                            # Run fast text scan (panic_mode=True to ensure it's quick and doesn't recurse)
+                            text_scan_result = self.scan_text_content(text_to_scan, panic_mode=True)
+                            
+                            # Merge YARA matches
+                            new_matches = text_scan_result.get('yara_matches', [])
+                            if new_matches:
+                                existing_rules = {m['rule'] for m in result['yara_matches']}
+                                for m in new_matches:
+                                    if m['rule'] not in existing_rules:
+                                        result['yara_matches'].append(m)
+                                        existing_rules.add(m['rule'])
+                                        
+                                result['is_suspicious'] = True
+                                logger.debug(f"YARA match via text extraction in {file_path.name}: {[m['rule'] for m in new_matches]}")
+                    except Exception as e:
+                        logger.warning(f"Failed to extract text for fast scan on {file_path.name}: {e}")
             
             result['scan_time_ms'] = (time.time() - start_time) * 1000
             
