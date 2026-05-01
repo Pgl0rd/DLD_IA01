@@ -1305,6 +1305,7 @@ class DetectionEngine:
             )
             
             # If text_content is still empty, check if it's an image that needs OCR
+            fast_scan_result = None
             if not text_content or not text_content.strip():
                 # Check if clipboard contains image (content_type = Image, FileList, or similar)
                 content_type = (
@@ -1324,18 +1325,58 @@ class DetectionEngine:
                 
                 # Case 1: content_type = "FileList" with image files
                 if content_type == 'filelist' and file_list:
-                    # Find first image file in file_list
-                    image_extensions = ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp']
+                    image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}
+                    extracted_texts = []
+                    aggregated_yara_matches = []
+                    
+                    # Giới hạn tối đa 10 file đầu tiên
+                    max_files = 10
+                    processed_count = 0
+                    
                     for file_path_str in file_list:
-                        if file_path_str:
-                            file_path_obj = Path(str(file_path_str))
-                            if file_path_obj.suffix.lower() in image_extensions:
-                                image_file_path = file_path_obj
-                                logger.info(f"Found image file in FileList: {image_file_path}")
-                                break
+                        if processed_count >= max_files:
+                            logger.info(f"Reached max limit of {max_files} files for bulk scanning.")
+                            break
+                        if not file_path_str:
+                            continue
+                            
+                        p = Path(str(file_path_str))
+                        if not p.exists():
+                            continue
+                            
+                        processed_count += 1
+                        ext = p.suffix.lower()
+                        
+                        if ext in image_extensions:
+                            logger.info(f"Processing image file in FileList for OCR: {p.name}")
+                            try:
+                                ocr_text = self.deep_analysis.ocr_processor.extract_text(p)
+                                if ocr_text and ocr_text.strip():
+                                    extracted_texts.append(ocr_text.strip())
+                            except Exception as e:
+                                logger.warning(f"OCR error for {p.name}: {e}")
+                        else:
+                            # Non-image file, scan using fast_scan.scan_file
+                            logger.info(f"Processing document file in FileList: {p.name}")
+                            try:
+                                fs_res = self.fast_scan.scan_file(p, panic_mode=self.queue_consumer.check_panic_mode())
+                                if fs_res and fs_res.get('yara_matches'):
+                                    aggregated_yara_matches.extend(fs_res.get('yara_matches'))
+                            except Exception as e:
+                                logger.warning(f"File scan error for {p.name}: {e}")
+                                
+                    if extracted_texts:
+                        text_content = "\n---\n".join(extracted_texts)
+                        logger.info(f"OCR extracted {len(text_content)} total chars from FileList images.")
+                    
+                    if aggregated_yara_matches:
+                        fast_scan_result = {
+                            'yara_matches': aggregated_yara_matches,
+                            'is_suspicious': len(aggregated_yara_matches) > 0
+                        }
                 
                 # Case 2: content_type = "Image" or similar with direct image_file path
-                if not image_file_path and ('image' in content_type or not content_type):
+                elif not image_file_path and ('image' in content_type or not content_type):
                     image_file_path = (
                         clipboard.get('image_file') or
                         raw_clipboard.get('image_file') or
@@ -1346,25 +1387,25 @@ class DetectionEngine:
                     if image_file_path:
                         image_file_path = Path(image_file_path)
                 
-                # If we found an image file, perform OCR
-                if image_file_path:
-                    if image_file_path.exists():
-                        logger.info(f"Processing image file for OCR: {image_file_path}")
-                        # Extract OCR text from image
-                        ocr_text = self.deep_analysis.ocr_processor.extract_text(image_file_path)
-                        if ocr_text and ocr_text.strip():
-                            logger.info(f"OCR extracted {len(ocr_text)} characters from image: {ocr_text[:100]}...")
-                            # Use OCR text as text_content for scanning
-                            text_content = ocr_text
+                    # If we found an image file, perform OCR
+                    if image_file_path:
+                        if image_file_path.exists():
+                            logger.info(f"Processing image file for OCR: {image_file_path}")
+                            # Extract OCR text from image
+                            ocr_text = self.deep_analysis.ocr_processor.extract_text(image_file_path)
+                            if ocr_text and ocr_text.strip():
+                                logger.info(f"OCR extracted {len(ocr_text)} characters from image: {ocr_text[:100]}...")
+                                # Use OCR text as text_content for scanning
+                                text_content = ocr_text
+                            else:
+                                logger.debug(f"No text extracted from image via OCR: {image_file_path}")
+                                # No text in image - but still process for behavioral rules (paste to Zalo is risky)
+                                # Don't return True here - let it continue to check behavioral rules
+                                text_content = ""  # Empty but continue processing
                         else:
-                            logger.debug(f"No text extracted from image via OCR: {image_file_path}")
-                            # No text in image - but still process for behavioral rules (paste to Zalo is risky)
-                            # Don't return True here - let it continue to check behavioral rules
-                            text_content = ""  # Empty but continue processing
-                    else:
-                        logger.warning(f"Image file path does not exist: {image_file_path}")
-                        # File doesn't exist - skip OCR but continue for behavioral rules
-                        text_content = ""
+                            logger.warning(f"Image file path does not exist: {image_file_path}")
+                            # File doesn't exist - skip OCR but continue for behavioral rules
+                            text_content = ""
                 
                 # If still no text content and not FileList/Image, skip
                 if not text_content and content_type not in ['filelist', 'image', 'bitmap', '']:
@@ -1399,14 +1440,14 @@ class DetectionEngine:
             if event.get('system', {}).get('panic_mode', False):
                 panic_mode = True
             
+            if fast_scan_result is None:
+                fast_scan_result = {'yara_matches': [], 'is_suspicious': False}
+                
             # 2. Fast Scan text content with YARA (even if empty, for FileList we still check behavioral rules)
             logger.debug("Starting YARA scan on clipboard content...")
             if text_content:
-                fast_scan_result = self.fast_scan.scan_text_content(text_content, panic_mode)
-            else:
-                # No text content yet (FileList with images - OCR may extract text later, or no text in image)
-                # Still create empty scan result for behavioral rules check
-                fast_scan_result = {'yara_matches': [], 'is_suspicious': False}
+                text_scan_res = self.fast_scan.scan_text_content(text_content, panic_mode)
+                fast_scan_result = self._merge_fast_scan(fast_scan_result, text_scan_res)
             
             # Log YARA scan results
             yara_matches = fast_scan_result.get('yara_matches', [])
