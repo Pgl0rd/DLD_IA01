@@ -614,16 +614,18 @@ class DetectionEngine:
                     bulk_feats.get("bulk_window_sec"),
                 )
 
-            # Force content scan for any external transfer event (USB / removable / network).
-            # Ensures YARA-on-text is always applied even when raw-byte YARA finds nothing.
+            # Bắt buộc scan nội dung nếu file > 30KB và là event chuyển file ra thiết bị ngoại vi.
+            # Không phụ thuộc vào YARA raw bytes hay ngưỡng bulk.
+            FORCE_SCAN_MIN_KB = 30
             force_content_scan = (
                 not panic_mode
-                and file_size_mb > 0
+                and file_size_mb >= (FORCE_SCAN_MIN_KB / 1024)
                 and self._is_external_transfer_event(event)
             )
             if force_content_scan:
                 logger.debug(
-                    "External transfer detected – forcing content scan for %s", file_path.name
+                    "External transfer >%dKB – forcing content scan for %s (%.1fKB)",
+                    FORCE_SCAN_MIN_KB, file_path.name, file_size_mb * 1024
                 )
 
             # 4. Decision Point
