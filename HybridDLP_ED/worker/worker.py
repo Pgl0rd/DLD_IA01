@@ -614,10 +614,22 @@ class DetectionEngine:
                     bulk_feats.get("bulk_window_sec"),
                 )
 
+            # Force content scan for any external transfer event (USB / removable / network).
+            # Ensures YARA-on-text is always applied even when raw-byte YARA finds nothing.
+            force_content_scan = (
+                not panic_mode
+                and file_size_mb > 0
+                and self._is_external_transfer_event(event)
+            )
+            if force_content_scan:
+                logger.debug(
+                    "External transfer detected – forcing content scan for %s", file_path.name
+                )
+
             # 4. Decision Point
-            if fast_scan_result.get('is_suspicious', False) or bulk_force_deep:
+            if fast_scan_result.get('is_suspicious', False) or bulk_force_deep or force_content_scan:
                 # Nếu YARA phát hiện ngay với high confidence → có thể skip deep analysis
-                if yara_matches and not panic_mode and not bulk_force_deep:
+                if yara_matches and not panic_mode and not bulk_force_deep and not force_content_scan:
                     # Check nếu là high-risk rule (ID, credit card)
                     high_risk_rules = ['id', 'cmnd', 'cccd', 'credit', 'card']
                     is_high_risk = any(
@@ -636,19 +648,23 @@ class DetectionEngine:
                             panic_mode
                         )
                 else:
-                    # Panic mode → skip deep analysis. Bulk-force only works when not panic.
-                    if (not panic_mode) and bulk_force_deep:
+                    # force_content_scan hoặc bulk_force_deep → chạy full deep analysis
+                    if not panic_mode:
                         deep_analysis_result = self.deep_analysis.analyze(
                             file_path,
                             fast_scan_result.get('file_type'),
                             panic_mode
                         )
-                        deep_analysis_result["bulk_triggered_deep_scan"] = True
+                        if bulk_force_deep:
+                            deep_analysis_result["bulk_triggered_deep_scan"] = True
+                        if force_content_scan:
+                            deep_analysis_result["forced_content_scan"] = True
                     else:
                         deep_analysis_result = {'is_sensitive': False}
             else:
-                # Safe từ fast scan → skip deep analysis
+                # Safe từ fast scan, không phải external transfer → skip deep analysis
                 deep_analysis_result = {'is_sensitive': False}
+
             
             # 5.5. Behavioral Rules Check (theo Noteupdate.txt)
             # Check các behavioral rules dựa trên điều kiện từ event fields
