@@ -221,16 +221,104 @@ class ContentProcessor:
             doc = Document(str(file_path))
             parts = [p.text for p in doc.paragraphs if p.text]
             text = "\n".join(parts)
+            
+            # Extract images and OCR text
+            ocr_texts = self._extract_and_ocr_images_from_docx(file_path)
+            if ocr_texts:
+                text += "\n[OCR from embedded images]\n" + "\n".join(ocr_texts)
+            
+            image_count = len(ocr_texts) if ocr_texts else 0
+            
             return ExtractionResult(
                 detected_type=detected.mime_type,
                 parser="python-docx",
                 text=text[: self.max_text_length],
                 truncated=len(text) > self.max_text_length,
                 confidence=detected.confidence,
-                metadata={"paragraphs": len(parts), "group": detected.group},
+                metadata={
+                    "paragraphs": len(parts),
+                    "extracted_images": image_count,
+                    "group": detected.group
+                },
             )
         except Exception:
             return self._extract_docx_xml_fallback(file_path, detected)
+
+    def _extract_and_ocr_images_from_docx(self, file_path: Path) -> Optional[list]:
+        """
+        Extract images from DOCX and perform OCR on them.
+        DOCX is a ZIP file with images in word/media/ folder.
+        
+        Returns: List of OCR text strings from images, or empty list
+        """
+        try:
+            import tempfile
+            import os
+            from pathlib import Path
+            
+            # Lazy load OCR processor
+            try:
+                from core.deep_analysis import OCRProcessor
+                ocr_processor = OCRProcessor()
+            except ImportError:
+                logger.debug("OCR not available, skipping image extraction from DOCX")
+                return []
+            
+            ocr_results = []
+            
+            # Open DOCX as ZIP and extract images
+            with zipfile.ZipFile(file_path, 'r') as zf:
+                # Get all files in word/media folder
+                media_files = [f for f in zf.namelist() if f.startswith('word/media/')]
+                
+                if not media_files:
+                    logger.debug(f"No images found in DOCX: {file_path.name}")
+                    return []
+                
+                # Process up to 10 images
+                for idx, media_file in enumerate(media_files[:10]):
+                    try:
+                        # Extract image to temporary file
+                        image_data = zf.read(media_file)
+                        
+                        # Create temp file with proper extension
+                        ext = Path(media_file).suffix.lower()
+                        if ext not in ['.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff']:
+                            logger.debug(f"Skipping non-image media file: {media_file}")
+                            continue
+                        
+                        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
+                            tmp.write(image_data)
+                            tmp_path = Path(tmp.name)
+                        
+                        try:
+                            # Run OCR on extracted image
+                            ocr_text = ocr_processor.extract_text(tmp_path)
+                            if ocr_text and ocr_text.strip():
+                                logger.info(
+                                    f"DOCX image OCR: {len(ocr_text)} chars from {media_file} "
+                                    f"({ocr_text[:60]}...)"
+                                )
+                                ocr_results.append(ocr_text.strip())
+                            else:
+                                logger.debug(f"No text extracted from {media_file}")
+                        finally:
+                            # Clean up temp file
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                    
+                    except Exception as e:
+                        logger.warning(f"Error processing DOCX image {media_file}: {e}")
+                        continue
+            
+            logger.info(f"Extracted and OCR'd {len(ocr_results)} images from {file_path.name}")
+            return ocr_results
+        
+        except Exception as e:
+            logger.warning(f"Error extracting images from DOCX {file_path.name}: {e}")
+            return []
 
     def _extract_docx_xml_fallback(self, file_path: Path, detected: DetectedType) -> ExtractionResult:
         try:

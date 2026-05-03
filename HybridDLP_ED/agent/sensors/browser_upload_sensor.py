@@ -132,7 +132,7 @@ class BrowserUploadSensor:
                 candidates.append(home / "Downloads" / stem)
                 candidates.append(home / "Pictures" / stem)
             else:
-                candidates.append(home / "Downloads" / stem)
+                candidates.append(home / "Downloads" /  stem)
                 candidates.append(home / "Documents" / stem)
                 candidates.append(home / "Desktop" / stem)
 
