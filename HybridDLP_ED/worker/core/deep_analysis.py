@@ -158,12 +158,30 @@ class OCRProcessor:
             return None
         
         try:
-            # Handle PDF by header detection (still skipped without pdf2image).
+            # Handle scanned/image PDFs when pdf2image + Poppler are available.
             with open(file_path, "rb") as f:
                 header = f.read(4)
             if header.startswith(b"%PDF"):
-                logger.warning("PDF OCR not implemented yet (requires pdf2image)")
-                return None
+                try:
+                    from pdf2image import convert_from_path  # type: ignore
+
+                    pages = convert_from_path(str(file_path), first_page=1, last_page=3, dpi=200)
+                    texts = []
+                    for idx, page in enumerate(pages, start=1):
+                        text = self.pytesseract.image_to_string(page, lang='vie+eng')
+                        if text and text.strip():
+                            texts.append(text.strip())
+                            logger.debug(
+                                f"PDF OCR extracted {len(text.strip())} characters "
+                                f"from {file_path.name} page {idx}"
+                            )
+                    return "\n".join(texts).strip() or None
+                except Exception as e:
+                    logger.warning(
+                        f"PDF OCR unavailable for {file_path.name}: {e}. "
+                        "Install Poppler and ensure it is on PATH for scanned PDFs."
+                    )
+                    return None
             
             # Load image
             image = self.Image.open(file_path)

@@ -6,6 +6,10 @@
 # File Processing
 yara-python>=4.3.0
 python-magic>=0.4.27  # File type detection
+python-docx>=1.1.2  # DOCX text extraction
+openpyxl>=3.1.2  # XLSX/CSV-like workbook extraction
+pypdf>=4.2.0  # Text-based PDF extraction
+pdf2image>=1.17.0  # Scanned PDF OCR helper; requires Poppler installed/on PATH
 
 # OCR
 pytesseract>=0.3.10

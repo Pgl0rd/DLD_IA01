@@ -709,6 +709,7 @@ class NetworkUploadRule(BehavioralRule):
             ext = Path(file_path).suffix.lower()
         
         is_sensitive_label = any(k in sensitivity for k in ["sensitive", "confidential", "highly"])
+        is_high_label = any(k in sensitivity for k in ["confidential", "highly"])
         is_sensitive_ext = ext in sensitive_exts
         is_corr_source = evt_type in {
             # corr_suspected_upload đã bị skip ở worker process_event() — không có mặt ở đây
@@ -727,6 +728,22 @@ class NetworkUploadRule(BehavioralRule):
         )
         if not cond_sensitive:
             return False, {}
+
+        yara_count = len(yara_matches)
+        evidence_level = "low"
+        if ioc_hits or is_high_label or yara_count >= 3 or has_recent_staging or is_corr_source:
+            evidence_level = "high"
+        elif (
+            (is_sensitive_label and (yara_count >= 1 or is_sensitive_ext))
+            or (yara_count >= 2 and is_sensitive_ext)
+        ):
+            evidence_level = "medium"
+
+        severity = {
+            "high": "high",
+            "medium": "medium",
+            "low": "low",
+        }.get(evidence_level, "low")
         
         # -------- Build details --------
         reason_parts = [
@@ -746,18 +763,20 @@ class NetworkUploadRule(BehavioralRule):
             reason_parts.append(f"ioc_hits={len(ioc_hits)}")
         if has_recent_staging:
             reason_parts.append("recent_staging=True")
+        reason_parts.append(f"evidence={evidence_level}")
         
         reason = " | ".join(reason_parts)
         
         logger.warning(
             f"NetworkUploadRule VIOLATION DETECTED: "
             f"dest={dest_domain or dest_ip}, process={process_name or app}, "
-            f"bytes_out={bytes_out}, sensitivity={sensitivity}, yara={len(yara_matches)}, ioc={len(ioc_hits)}"
+            f"bytes_out={bytes_out}, sensitivity={sensitivity}, yara={yara_count}, "
+            f"ioc={len(ioc_hits)}, evidence={evidence_level}, severity={severity}"
         )
         
         return True, {
             "rule_name": self.name,
-            "severity": self.severity,
+            "severity": severity,
             "dest_domain": dest_domain,
             "dest_ip": dest_ip,
             "dest_app": app,
@@ -767,6 +786,7 @@ class NetworkUploadRule(BehavioralRule):
             "sensitivity": sensitivity,
             "yara_matches": yara_matches,
             "ioc_hits_count": len(ioc_hits),
+            "evidence_level": evidence_level,
             "recent_staging": has_recent_staging,
             "reason": reason,
         }

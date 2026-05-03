@@ -67,7 +67,7 @@ def _make_correlator_and_pqueue():
 class DetectionEngine:
     """Detection Engine Main Class"""
     LOW_MEDIUM_FILE_NAMES = {
-        "bienbancuochop_q1_2026.docx",
+          "bienbancuochop_q1_2026.docx",
         "danhmucbosungvattu_05_2026.csv",
         "danhsachbosungthietbi_2026.csv",
         "huongdannhanviensudungmayin.docx",
@@ -77,9 +77,10 @@ class DetectionEngine:
         "listnhanvienmoi_2026.docx",
         "phieudenghibosungvanphongpham_2026.docx",
         "thongtinvanhanhthuongki_04_2026.docx",
+        
     }
     HIGH_RISK_FILE_NAMES = {
-        "bangluong_thang02_2026.csv",
+         "bangluong_thang02_2026.csv",
         "baocaotaichinhq1_2026.csv",
         "danhsachcongnoq1_2026.csv",
         "danhsachkhachhang_q1_2026.csv",
@@ -97,6 +98,7 @@ class DetectionEngine:
         "Hợp Đồng NTT Dự án (2).pdf",
         "Hợp Đồng NTT Dự án (3).docx",
         "Hợp Đồng NTT Dự án (3).pdf",
+       
     }
     
     def __init__(self):
@@ -327,6 +329,58 @@ class DetectionEngine:
             return True
         return False
 
+    def _browser_upload_evidence_level(self, event: dict, fast_scan_result: dict, file_size_mb: float = 0.0) -> str:
+        """Classify browser-upload evidence so weak upload telemetry cannot max out risk."""
+        obj = event.get("object", {}) or {}
+        sensitivity = str(obj.get("sensitivity") or event.get("File_Sensitivity") or "").lower()
+        yara_count = len((fast_scan_result or {}).get("yara_matches") or [])
+        ioc_count = len(event.get("ioc_hits") or [])
+        debug = event.get("debug", {}) or {}
+        evidence = debug.get("evidence", {}) if isinstance(debug, dict) else {}
+        has_recent_staging = bool(evidence.get("recent_staging")) if isinstance(evidence, dict) else False
+
+        is_high_label = any(k in sensitivity for k in ("highly", "confidential"))
+        is_sensitive_label = any(k in sensitivity for k in ("sensitive", "confidential", "highly"))
+
+        ext = str(obj.get("ext") or Path(str(obj.get("name") or "")).suffix or "").lower()
+        sensitive_exts = {".xlsx", ".xls", ".csv", ".docx", ".doc", ".pdf", ".sql", ".zip", ".7z", ".env"}
+        is_sensitive_ext = ext in sensitive_exts
+
+        if ioc_count > 0 or is_high_label or yara_count >= 3 or has_recent_staging:
+            return "high"
+        if (
+            (is_sensitive_label and (yara_count >= 1 or file_size_mb >= 0.5 or is_sensitive_ext))
+            or (yara_count >= 2 and is_sensitive_ext)
+        ):
+            return "medium"
+        return "low"
+
+    def _cap_browser_upload_weak_risk(self, risk_result: dict, evidence_level: str) -> None:
+        """Keep weak browser-upload evidence as log-only and medium evidence below popup range."""
+        if evidence_level == "low":
+            cap = 3.9
+            if float(risk_result.get("total_score", 0.0)) > cap:
+                risk_result["total_score"] = cap
+                risk_result["cvss_score"] = cap
+                risk_result["risk_level"] = "low"
+                risk_result["action"] = "log"
+                risk_result.setdefault("details", {})["browser_upload_evidence_cap"] = {
+                    "evidence_level": evidence_level,
+                    "cap": cap,
+                    "reason": "weak_content_evidence",
+                }
+        elif evidence_level == "medium":
+            cap = 6.9
+            if float(risk_result.get("total_score", 0.0)) > cap:
+                risk_result["total_score"] = cap
+                risk_result["cvss_score"] = cap
+                risk_result["risk_level"] = "medium"
+                risk_result.setdefault("details", {})["browser_upload_evidence_cap"] = {
+                    "evidence_level": evidence_level,
+                    "cap": cap,
+                    "reason": "medium_content_evidence",
+                }
+
     def _compute_bulk_exfil_features(self, event: dict, file_size_mb: float) -> dict:
         """
         Aggregate recent *external transfer* events (same user) in a sliding window.
@@ -455,6 +509,36 @@ class DetectionEngine:
             if event_type == 'browser_upload':
                 return self._process_browser_upload_event(event)
 
+            file_path_str = (
+                event.get('path') or
+                event.get('file_path') or
+                event.get('object', {}).get('path') or
+                ''
+            )
+            is_file_event = (
+                str(source).lower() in {'file', 'endpoint'}
+                or str(event_type).lower().startswith('file_')
+                or str(op_type).lower().startswith('file_')
+                or self._is_external_transfer_event(event)
+            )
+            is_special_event = (
+                event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'volume_mounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
+                or event_type in [
+                    'http_upload',
+                    'file_upload',
+                    'network_upload',
+                    'network_flow',
+                    'network_flow_summary',
+                    'http_request',
+                    'cloud_exfiltration',
+                    'data_exfiltration',
+                ]
+            )
+            if event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'volume_mounted']:
+                return self._process_special_event(event)
+            if is_special_event and not is_file_event:
+                return self._process_special_event(event)
+
             # ==== Xử lý Clipboard Events ====
             # Check nếu là clipboard event (clipboard_paste, clipboard_text, etc.)
             # Also check clipboard field exists
@@ -463,7 +547,7 @@ class DetectionEngine:
                 'clipboard' in event_type.lower() or
                 'clipboard' in source.lower() or
                 'clipboard' in op_type or
-                has_clipboard_field
+                (has_clipboard_field and not is_file_event and not is_special_event)
             )
             
             # Log for debugging
@@ -484,7 +568,7 @@ class DetectionEngine:
             
             # Special events that don't have file path but need behavioral rules analysis
             is_special_event = (
-                event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
+                event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'volume_mounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
                 # Network / exfil events without a local file path (browser_upload đã có handler riêng)
                 or event_type in [
                     'http_upload',
@@ -552,9 +636,15 @@ class DetectionEngine:
             if cached_result:
                 scan_result = cached_result.get('scan_result', '')
                 if scan_result == 'safe':
-                    logger.debug(f"File cached as safe: {file_path.name}")
-                    self.processed_count += 1
-                    return True
+                    if self._is_external_transfer_event(event):
+                        logger.info(
+                            f"File cached as safe but external transfer requires policy analysis: "
+                            f"{file_path.name}"
+                        )
+                    else:
+                        logger.debug(f"File cached as safe: {file_path.name}")
+                        self.processed_count += 1
+                        return True
                 elif scan_result == 'malicious':
                     cached_malicious_score = float(cached_result.get('risk_score', 10.0))
                     logger.info(f"File cached as malicious: {file_path.name}, keeping cached risk score: {cached_malicious_score}")
@@ -568,12 +658,18 @@ class DetectionEngine:
                 if ssdeep_sig:
                     fuzzy_safe = self.hash_cache.find_fuzzy_safe_match(ssdeep_sig, int(size_bytes))
                     if fuzzy_safe:
-                        logger.info(
-                            f"SSDEEP fuzzy cache hit (safe): {file_path.name} "
-                            f"match_score={fuzzy_safe.get('ssdeep_matched_score')}"
-                        )
-                        self.processed_count += 1
-                        return True
+                        if self._is_external_transfer_event(event):
+                            logger.info(
+                                f"SSDEEP fuzzy safe hit but external transfer requires policy analysis: "
+                                f"{file_path.name} match_score={fuzzy_safe.get('ssdeep_matched_score')}"
+                            )
+                        else:
+                            logger.info(
+                                f"SSDEEP fuzzy cache hit (safe): {file_path.name} "
+                                f"match_score={fuzzy_safe.get('ssdeep_matched_score')}"
+                            )
+                            self.processed_count += 1
+                            return True
             
             # 3. Fast Scan (file content)
             # Nếu là external transfer + file >= FORCE_SCAN_MIN_KB → bắt buộc bóc nội dung tại tầng fast scan
@@ -1128,6 +1224,9 @@ class DetectionEngine:
                 )
 
             yara_matches = fast_scan_result.get('yara_matches', [])
+            upload_evidence_level = self._browser_upload_evidence_level(
+                event, fast_scan_result, file_size_mb=file_size_mb
+            )
 
             # ---- 4. Behavioral Rules ----
             behavioral_matches   = self.behavioral_rules.check_all(event, fast_scan_result)
@@ -1139,10 +1238,16 @@ class DetectionEngine:
                     behavioral_risk_boost = WorkerConfig.BEHAVIORAL_RISK_BOOST.get(
                         highest.get('severity', 'low'), 0
                     )
+                    if highest.get('rule') == 'Network_Upload':
+                        if upload_evidence_level == 'low':
+                            behavioral_risk_boost = 0
+                        elif upload_evidence_level == 'medium':
+                            behavioral_risk_boost = min(float(behavioral_risk_boost), 1.2)
                     behavioral_details = {
                         'behavioral_rule_matched': highest.get('rule'),
                         'behavioral_reason':       highest.get('reason', ''),
                         'behavioral_severity':     highest.get('severity'),
+                        'upload_evidence_level':   upload_evidence_level,
                         'all_behavioral_matches':  behavioral_matches,
                     }
                     logger.warning(
@@ -1193,6 +1298,7 @@ class DetectionEngine:
                 'upload_trigger':             trigger,
                 'upload_browser':             browser,
                 'upload_confidence':          upload_confidence,
+                'upload_evidence_level':      upload_evidence_level,
                 'is_sensitive_external_destination': is_sensitive_dest,
                 # Behavioral / ML
                 'behavioral_risk_boost':      behavioral_risk_boost,
@@ -1218,9 +1324,11 @@ class DetectionEngine:
                         risk_result['action'] = 'alert'
 
             # Boost từ upload confidence cao (>= 0.85 = browser extension rất chắc là upload nhạy cảm)
-            if upload_confidence >= 0.85 and fn_band != 'low_medium':
+            if upload_confidence >= 0.85 and fn_band != 'low_medium' and upload_evidence_level != 'low':
                 conf_boost = round((upload_confidence - 0.85) * 20, 2)  # max +3.0
                 risk_result['total_score'] = min(10.0, risk_result['total_score'] + conf_boost)
+                if 'cvss_score' in risk_result:
+                    risk_result['cvss_score'] = round(min(10.0, risk_result['total_score']), 2)
                 risk_result.setdefault('details', {})['upload_confidence_boost'] = conf_boost
 
             # Apply behavioral boost
@@ -1235,6 +1343,8 @@ class DetectionEngine:
                         risk_result['action'] = 'alert'
 
             self._apply_filename_risk_policy(event, risk_result, fallback_name=filename)
+            if fn_band != 'high':
+                self._cap_browser_upload_weak_risk(risk_result, upload_evidence_level)
 
             # ---- 7. Report & Action (với alert dedup tránh spam) ----
             dummy_path = Path(file_path) if file_path else Path(f"browser_upload://{filename or dest_domain}")

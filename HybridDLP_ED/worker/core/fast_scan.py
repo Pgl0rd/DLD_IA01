@@ -117,7 +117,10 @@ class FastScanEngine:
             'file_type': None,
             'is_encrypted_zip': False,
             'is_suspicious': False,
-            'scan_time_ms': 0
+            'scan_time_ms': 0,
+            'extraction_parser': '',
+            'extracted_text_len': 0,
+            'extraction_error': '',
         }
         
         if not file_path.exists():
@@ -167,12 +170,16 @@ class FastScanEngine:
                     try:
                         extraction = self.content_processor.extract_content(file_path, detected)
                         text_to_scan = extraction.text if extraction.text else ""
+                        result['extraction_parser'] = extraction.parser
+                        result['extracted_text_len'] = len(text_to_scan)
+                        result['extraction_error'] = extraction.error
                         
                         # Perform OCR if needed (e.g., images or short PDFs)
                         if extraction.needs_ocr:
                             ocr_text = self.ocr_processor.extract_text(file_path)
                             if ocr_text:
                                 text_to_scan += "\n" + ocr_text
+                                result['extracted_text_len'] = len(text_to_scan)
 
                         if text_to_scan and text_to_scan.strip():
                             # Run YARA trên text đã bóc
@@ -193,6 +200,7 @@ class FastScanEngine:
                         if force_extract:
                             result['force_extract_applied'] = True
                     except Exception as e:
+                        result['extraction_error'] = str(e)
                         logger.warning(f"Failed to extract text for fast scan on {file_path.name}: {e}")
         
     
