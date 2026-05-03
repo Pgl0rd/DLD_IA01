@@ -582,15 +582,49 @@ class USBDataExfiltrationRule(BehavioralRule):
             event.get('File_Sensitivity') or
             ''
         ).lower()
-        
+        file_name = (
+            obj.get('name')
+            or raw_obj.get('name')
+            or dest_path
+            or event.get('file_path')
+            or ''
+        )
+        file_ext = Path(str(file_name)).suffix.lower()
+        is_archive = file_ext in {'.zip', '.7z', '.rar'}
+        archive_scanned = bool(fast_scan_result.get('archive_scanned'))
+        archive_sensitive_hits = fast_scan_result.get('archive_sensitive_hits') or []
+        archive_encrypted = bool(fast_scan_result.get('is_encrypted_zip'))
+
+        if is_archive and archive_scanned and not archive_encrypted and not yara_matches and not archive_sensitive_hits:
+            if 'confidential' not in file_sensitivity and 'highly' not in file_sensitivity:
+                return False, {
+                    'rule_name': self.name,
+                    'severity': 'low',
+                    'dest_volume_type': dest_volume_type,
+                    'dest_path': dest_path,
+                    'file_sensitivity': file_sensitivity,
+                    'archive_scanned': True,
+                    'archive_entries': fast_scan_result.get('archive_entries'),
+                    'archive_scanned_files': fast_scan_result.get('archive_scanned_files'),
+                    'reason': "ZIP copied to USB but scanned archive content had no sensitive hits"
+                }
+         
         if yara_matches or 'sensitive' in file_sensitivity or 'confidential' in file_sensitivity:
             return True, {
                 'rule_name': self.name,
-                'severity': self.severity,
+                'severity': (
+                    self.severity
+                    if not (is_archive and archive_scanned and not archive_encrypted and not archive_sensitive_hits)
+                    else 'medium'
+                ),
                 'dest_volume_type': dest_volume_type,
                 'dest_path': dest_path,
                 'yara_matches': yara_matches,
                 'file_sensitivity': file_sensitivity,
+                'archive_scanned': archive_scanned,
+                'archive_entries': fast_scan_result.get('archive_entries'),
+                'archive_scanned_files': fast_scan_result.get('archive_scanned_files'),
+                'archive_sensitive_hits': archive_sensitive_hits,
                 'reason': f"Copy dữ liệu nhạy cảm ra USB/Removable: {dest_path}"
             }
         

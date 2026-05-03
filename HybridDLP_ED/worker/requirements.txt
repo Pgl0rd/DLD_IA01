@@ -32,6 +32,9 @@ httpx>=0.27.0  # agent/agent_sender.py (importado pelo worker no Windows)
 # Logging
 loguru>=0.7.0  # Better logging
 
+# Modern endpoint popup UI (dark mode / Fluent-like warning window)
+customtkinter>=5.2.2
+
 # Configuration
 python-dotenv>=1.0.0  # Environment variables
 

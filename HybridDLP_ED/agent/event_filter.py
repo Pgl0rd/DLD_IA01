@@ -183,6 +183,29 @@ class EventFilter:
 
         return config
 
+    def _is_external_transfer_event(self, event: Dict[str, Any]) -> bool:
+        """Keep USB/network transfer events even when the process is otherwise noisy."""
+        operation = event.get("operation") if isinstance(event.get("operation"), dict) else {}
+        obj = event.get("object") if isinstance(event.get("object"), dict) else {}
+        op_type = str(operation.get("op_type") or event.get("type") or "").lower()
+        semantic_hint = str(operation.get("dlp_semantic_hint") or "").lower()
+        semantic_action = str(operation.get("semantic_action") or "").lower()
+        dest_volume = str(
+            operation.get("dest_volume_type")
+            or obj.get("dest_volume_type")
+            or obj.get("volume_type")
+            or ""
+        ).lower()
+
+        if semantic_hint == "local" and "external" not in op_type and "copy_to_removable" not in semantic_action:
+            return False
+        return (
+            "external" in op_type
+            or "copy_to_removable" in semantic_action
+            or "external_transfer" in semantic_hint
+            or dest_volume in {"removable", "network"}
+        )
+
     def should_drop(self, event: Dict[str, Any]) -> bool:
         """Kiểm tra xem event có nên bị drop hay không."""
         if not self.enabled:
@@ -194,6 +217,9 @@ class EventFilter:
             if self.verbose:
                 print(f"[EVENT_FILTER] Drop: event type '{event_type}'")
             return True
+
+        if self._is_external_transfer_event(event):
+            return False
 
         # Rule 2: Check actor/process name
         actor = event.get("actor") if isinstance(event.get("actor"), dict) else {}

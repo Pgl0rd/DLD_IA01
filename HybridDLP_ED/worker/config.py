@@ -73,7 +73,7 @@ class WorkerConfig:
     FILE_STABILITY_MAX_WAIT_SEC = _env_float("FILE_STABILITY_MAX_WAIT_SEC", 3.0)
     # Invalidação cache khi policy/YARA/model thay đổi (Noteupdate §14)
     SCAN_ENGINE_VERSION = os.getenv("SCAN_ENGINE_VERSION", "1.0.0").strip() or "1.0.0"
-    POLICY_VERSION = os.getenv("POLICY_VERSION", "1.0.0").strip() or "1.0.0"
+    POLICY_VERSION = os.getenv("POLICY_VERSION", "1.0.1").strip() or "1.0.1"
     # Chống alert lặp cùng hash (giây) — Noteupdate §19
     ALERT_DEDUP_SEC = float(os.getenv("ALERT_DEDUP_SEC", "600"))
     # Khi bật: cảnh báo trùng nội dung gần giống (ssdeep) cũng gộp trong cửa sổ dedup,

@@ -5,6 +5,8 @@ import yara
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 from loguru import logger
+import tempfile
+import zipfile
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -121,6 +123,12 @@ class FastScanEngine:
             'extraction_parser': '',
             'extracted_text_len': 0,
             'extraction_error': '',
+            'archive_scanned': False,
+            'archive_entries': 0,
+            'archive_scanned_files': 0,
+            'archive_skipped_files': 0,
+            'archive_sensitive_hits': [],
+            'archive_scan_error': '',
         }
         
         if not file_path.exists():
@@ -162,7 +170,9 @@ class FastScanEngine:
                 if result['is_encrypted_zip']:
                     result['is_suspicious'] = True
                     logger.warning(f"Encrypted ZIP detected: {file_path.name}")
-                
+                elif file_path.suffix.lower() == '.zip':
+                    self._scan_zip_contents(file_path, result, panic_mode=panic_mode)
+                 
                 # 4. Text Extraction + YARA on text content
                 # Chạy nếu: file thuộc nhóm tài liệu/ảnh, HOẶC force_extract=True (external transfer >= ngưỡng KB)
                 should_extract = detected.group in ['docx', 'xlsx', 'pdf', 'text', 'image'] or force_extract
@@ -231,6 +241,111 @@ class FastScanEngine:
         except Exception as e:
             logger.debug(f"Error checking encrypted zip: {e}")
             return False
+
+    def _scan_zip_contents(self, file_path: Path, result: Dict[str, Any], panic_mode: bool = False) -> None:
+        """Scan text-bearing files inside a non-encrypted ZIP with bounded extraction."""
+        if panic_mode:
+            return
+
+        max_files = int(getattr(WorkerConfig, "ZIP_SCAN_MAX_FILES", 25))
+        max_member_bytes = int(getattr(WorkerConfig, "ZIP_SCAN_MAX_MEMBER_BYTES", 2 * 1024 * 1024))
+        max_total_bytes = int(getattr(WorkerConfig, "ZIP_SCAN_MAX_TOTAL_BYTES", 10 * 1024 * 1024))
+        supported_exts = {
+            ".txt", ".csv", ".log", ".md", ".json", ".xml",
+            ".docx", ".xlsx", ".pdf",
+        }
+
+        try:
+            with zipfile.ZipFile(file_path, "r") as zf:
+                infos = [info for info in zf.infolist() if not info.is_dir()]
+                result["archive_entries"] = len(infos)
+                result["archive_scanned"] = True
+
+                scanned = 0
+                skipped = 0
+                total_bytes = 0
+                existing_rules = {m.get("rule") for m in result.get("yara_matches", [])}
+
+                with tempfile.TemporaryDirectory(prefix="dlp_zip_scan_") as tmp_dir:
+                    tmp_root = Path(tmp_dir)
+                    for info in infos:
+                        if scanned >= max_files or total_bytes >= max_total_bytes:
+                            skipped += 1
+                            continue
+                        if info.flag_bits & 0x1:
+                            result["is_encrypted_zip"] = True
+                            result["is_suspicious"] = True
+                            skipped += 1
+                            continue
+                        if info.file_size <= 0 or info.file_size > max_member_bytes:
+                            skipped += 1
+                            continue
+
+                        inner_name = info.filename.replace("\\", "/")
+                        suffix = Path(inner_name).suffix.lower()
+                        if suffix not in supported_exts:
+                            skipped += 1
+                            continue
+
+                        total_bytes += int(info.file_size)
+                        safe_name = Path(inner_name).name or "member.bin"
+                        tmp_path = tmp_root / safe_name
+                        try:
+                            with zf.open(info, "r") as src, open(tmp_path, "wb") as dst:
+                                remaining = max_member_bytes + 1
+                                while remaining > 0:
+                                    chunk = src.read(min(65536, remaining))
+                                    if not chunk:
+                                        break
+                                    dst.write(chunk)
+                                    remaining -= len(chunk)
+
+                            detected = self.content_processor.detect_file_type(tmp_path)
+                            extraction = self.content_processor.extract_content(tmp_path, detected)
+                            text_to_scan = extraction.text or ""
+                            if text_to_scan.strip():
+                                text_scan_result = self.scan_text_content(text_to_scan, panic_mode=True)
+                                for match in text_scan_result.get("yara_matches", []):
+                                    rule = match.get("rule")
+                                    if rule not in existing_rules:
+                                        match = dict(match)
+                                        match["archive_member"] = inner_name
+                                        result["yara_matches"].append(match)
+                                        existing_rules.add(rule)
+                                    result["archive_sensitive_hits"].append({
+                                        "member": inner_name,
+                                        "rule": rule,
+                                    })
+                                if text_scan_result.get("is_suspicious"):
+                                    result["is_suspicious"] = True
+                            scanned += 1
+                        except Exception as e:
+                            skipped += 1
+                            logger.debug(f"ZIP member scan failed: {file_path.name}!{inner_name}: {e}")
+                        finally:
+                            try:
+                                tmp_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+
+                result["archive_scanned_files"] = scanned
+                result["archive_skipped_files"] = skipped
+                if result["archive_sensitive_hits"]:
+                    logger.info(
+                        f"ZIP content sensitive hits in {file_path.name}: "
+                        f"{result['archive_sensitive_hits'][:5]}"
+                    )
+                else:
+                    logger.info(
+                        f"ZIP content scan clean: {file_path.name} "
+                        f"entries={result['archive_entries']} scanned={scanned} skipped={skipped}"
+                    )
+        except zipfile.BadZipFile as e:
+            result["archive_scan_error"] = f"bad_zip:{e}"
+            logger.warning(f"Bad ZIP file, cannot scan contents: {file_path.name}")
+        except Exception as e:
+            result["archive_scan_error"] = str(e)
+            logger.warning(f"Failed to scan ZIP contents for {file_path.name}: {e}")
     
     def scan_text_content(self, text_content: str, panic_mode: bool = False) -> Dict[str, Any]:
         """

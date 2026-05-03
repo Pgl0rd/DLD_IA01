@@ -51,6 +51,158 @@ class ActionExecutor:
         # Ensure parent directory exists
         self.dashboard_log_path.parent.mkdir(parents=True, exist_ok=True)
         logger.info(f"[PID={os.getpid()}] Dashboard log directory exists: {self.dashboard_log_path.parent.exists()}")
+
+    def _extract_yara_matches(
+        self,
+        details: Dict[str, Any],
+        report: Optional[Dict[str, Any]] = None,
+    ) -> list:
+        """Return YARA match dictionaries from the richest available source."""
+        candidates = []
+        if report:
+            candidates.append((report.get("_detection") or {}).get("yara_matches"))
+        candidates.extend([
+            details.get("yara_matches"),
+            (details.get("content") or {}).get("yara_matches"),
+        ])
+
+        for value in candidates:
+            if isinstance(value, list):
+                return value
+        return []
+
+    def _rule_names(self, yara_matches: list, limit: int = 3) -> list:
+        names = []
+        for match in yara_matches or []:
+            if isinstance(match, dict):
+                name = match.get("rule") or match.get("name")
+            else:
+                name = str(match)
+            if name and name not in names:
+                names.append(str(name))
+            if len(names) >= limit:
+                break
+        return names
+
+    def _describe_action(
+        self,
+        context: Dict[str, Any],
+        report: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        report = report or {}
+        action_type = str(context.get("action_type") or report.get("Operation_Type") or "").lower()
+        destination = str(report.get("Dest_Path") or context.get("destination") or "").strip()
+        process_name = str(report.get("Process_Name") or context.get("process_name") or "").strip()
+
+        if "clipboard" in action_type or "paste" in action_type:
+            target = destination or context.get("window_title") or context.get("active_window") or process_name
+            return f"Dán dữ liệu nhạy cảm vào {target}" if target else "Dán dữ liệu nhạy cảm ra ngoài"
+        if "browser_upload" in action_type or "upload" in action_type:
+            return f"Tải file nhạy cảm lên {destination}" if destination else "Tải file nhạy cảm lên web/cloud"
+        if "usb" in action_type or "removable" in destination.lower():
+            return f"Sao chép file nhạy cảm ra thiết bị ngoài: {destination}" if destination else "Sao chép file nhạy cảm ra USB/ổ ngoài"
+        if "screenshot" in action_type:
+            return "Chụp màn hình có nội dung nhạy cảm"
+        if "print" in action_type:
+            return "In hoặc xuất tài liệu có nội dung nhạy cảm"
+        return report.get("Operation_Type") or context.get("action_type") or "Thao tác với dữ liệu nhạy cảm"
+
+    def _build_violation_reason(
+        self,
+        violation_type: str,
+        details: Dict[str, Any],
+        context: Dict[str, Any],
+        report: Optional[Dict[str, Any]],
+        yara_matches: list,
+    ) -> str:
+        report = report or {}
+        reasons = []
+
+        if details.get("cache_override") or context.get("cached_malicious_score"):
+            reasons.append("File trùng hash với tài liệu đã được hệ thống xác nhận là nhạy cảm")
+
+        force_reason = details.get("force_max_risk_reason")
+        if force_reason:
+            reasons.append(f"Dữ liệu rời khỏi vùng nhạy cảm: {force_reason}")
+
+        behavioral = details.get("behavioral") or context.get("behavioral_details") or {}
+        behavioral_reason = behavioral.get("behavioral_reason") or behavioral.get("reason")
+        behavioral_rule = behavioral.get("behavioral_rule_matched") or behavioral.get("rule")
+        if behavioral_reason:
+            if behavioral_rule:
+                reasons.append(f"Khớp hành vi {behavioral_rule}: {behavioral_reason}")
+            else:
+                reasons.append(str(behavioral_reason))
+
+        rule_names = self._rule_names(yara_matches)
+        if rule_names:
+            reasons.append(f"Nội dung file khớp rule phát hiện: {', '.join(rule_names)}")
+
+        sensitivity = str(report.get("File_Sensitivity") or "").strip()
+        if sensitivity and sensitivity.lower() != "normal":
+            reasons.append(f"Phân loại dữ liệu: {sensitivity}")
+
+        if reasons:
+            return "; ".join(reasons[:3])
+        return violation_type
+
+    def _build_user_guidance(
+        self,
+        details: Dict[str, Any],
+        context: Dict[str, Any],
+        report: Optional[Dict[str, Any]],
+    ) -> str:
+        report = report or {}
+        action_type = str(context.get("action_type") or "").lower()
+        destination = str(report.get("Dest_Path") or context.get("destination") or "").lower()
+
+        if details.get("cache_override") or context.get("cached_malicious_score"):
+            return "File này đã nằm trong danh sách nhạy cảm; không gửi, sao chép, đổi tên hoặc thử upload lại bằng kênh khác."
+        if "clipboard" in action_type or "paste" in action_type:
+            return "Không dán dữ liệu nội bộ vào web, chat, AI hoặc ứng dụng ngoài; hãy dùng kênh được công ty phê duyệt."
+        if "browser_upload" in action_type or "upload" in action_type or any(k in destination for k in ("drive", "dropbox", "onedrive", "http")):
+            return "Không upload tài liệu nhạy cảm lên cloud/web cá nhân; cần chia sẻ thì xin phê duyệt và dùng kho nội bộ."
+        if "usb" in action_type or "removable" in destination:
+            return "Không chép tài liệu nhạy cảm ra USB/ổ ngoài; hãy lưu trong vùng được cấp quyền hoặc yêu cầu phê duyệt bảo mật."
+        if "screenshot" in action_type:
+            return "Không chụp hoặc gửi ảnh màn hình chứa dữ liệu nhạy cảm; hãy che/mã hóa thông tin trước khi chia sẻ."
+        return "Dừng thao tác và liên hệ quản trị viên nếu cần xử lý hợp lệ; lặp lại hành vi có thể bị escalated theo chính sách."
+
+    def _build_notification_details(
+        self,
+        file_path: Path,
+        risk_score: float,
+        violation_type: str,
+        details: Dict[str, Any],
+        context: Dict[str, Any],
+        report: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        report = report or {}
+        yara_matches = self._extract_yara_matches(details, report)
+        is_clipboard = str(file_path) == "clipboard://clipboard_content" if file_path else False
+        file_name = report.get("File_Name") or (
+            file_path.name if hasattr(file_path, "name") and not is_clipboard else "Clipboard"
+        )
+        file_path_text = report.get("File_Path") or (
+            str(file_path) if file_path and not is_clipboard else None
+        )
+
+        return {
+            "risk_score": risk_score,
+            "window_title": context.get("window_title") or context.get("active_window") or "",
+            "yara_matches": yara_matches,
+            "action_type": context.get("action_type", ""),
+            "action_description": self._describe_action(context, report),
+            "violation_reason": self._build_violation_reason(
+                violation_type, details, context, report, yara_matches
+            ),
+            "user_guidance": self._build_user_guidance(details, context, report),
+            "file_name": file_name,
+            "file_path": file_path_text,
+            "destination": report.get("Dest_Path") or context.get("destination") or "",
+            "process_name": report.get("Process_Name") or context.get("process_name") or "",
+            "file_sensitivity": report.get("File_Sensitivity") or "",
+        }
     
     def execute(self, action: str, file_path: Path, 
                risk_score: float, details: Dict[str, Any],
@@ -123,8 +275,11 @@ class ActionExecutor:
                 'action_type': context.get('action_type', ''),
                 'file_path': str(file_path) if file_path and str(file_path) != 'clipboard://clipboard_content' else None
             }
+            notification_details = self._build_notification_details(
+                file_path, risk_score, violation_type, details, context, report
+            )
             self.notification.show_violation_alert(
-                violation_type=f"BI CHAN: {violation_type}",
+                violation_type=f"Bị chặn: {violation_type}",
                 details=notification_details
             )
         except Exception as e:
@@ -190,6 +345,9 @@ class ActionExecutor:
             }
             
             # Hiển thị popup Windows chỉ với mức rủi ro cao để tránh spam.
+            notification_details = self._build_notification_details(
+                file_path, risk_score, violation_type, details, context, report
+            )
             if float(risk_score) >= self.windows_alert_min_score:
                 self.notification.show_violation_alert(
                     violation_type=violation_type,
@@ -245,6 +403,47 @@ class ActionExecutor:
         
         return "Vi Phạm Chính Sách Bảo Mật"
     
+    def _determine_violation_type(self,
+                                  details: Dict[str, Any],
+                                  context: Dict[str, Any],
+                                  report: Optional[Dict[str, Any]] = None) -> str:
+        """Determine a user-facing violation type for the popup."""
+        action_type = str(context.get('action_type', '')).lower()
+
+        if details.get("cache_override") or context.get("cached_malicious_score"):
+            return "File đã biết là dữ liệu nhạy cảm"
+
+        if (
+            context.get('is_clipboard_paste')
+            or 'clipboard' in action_type
+            or 'paste' in action_type
+        ):
+            return "Paste dữ liệu nhạy cảm ra ứng dụng bên ngoài"
+
+        yara_matches = self._extract_yara_matches(details, report)
+        if yara_matches:
+            rules = [
+                str(m.get('rule', '') if isinstance(m, dict) else m).lower()
+                for m in yara_matches
+            ]
+            if any('id' in r or 'cmnd' in r or 'cccd' in r for r in rules):
+                return "Phát hiện thông tin CMND/CCCD"
+            if any('credit' in r or 'card' in r for r in rules):
+                return "Phát hiện thông tin thẻ tín dụng"
+            if any('bank' in r for r in rules):
+                return "Phát hiện thông tin tài khoản ngân hàng"
+            if any('api' in r or 'key' in r for r in rules):
+                return "Phát hiện API key/secret"
+            return "Phát hiện dữ liệu nhạy cảm"
+
+        destination = str(context.get('destination', '')).lower()
+        if 'usb' in action_type or 'removable' in destination:
+            return "Copy dữ liệu nhạy cảm ra USB/thiết bị ngoài"
+        if 'browser_upload' in action_type or 'upload' in action_type:
+            return "Upload dữ liệu nhạy cảm lên web/cloud"
+
+        return "Vi phạm chính sách bảo mật dữ liệu"
+
     def _log_action(self, file_path: Path, risk_score: float,
                    details: Dict[str, Any], context: Dict[str, Any],
                    report: Optional[Dict[str, Any]] = None) -> bool:

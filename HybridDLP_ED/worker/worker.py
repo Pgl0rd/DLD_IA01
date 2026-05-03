@@ -209,6 +209,66 @@ class DetectionEngine:
             return "high"
         return None
 
+    def _archive_member_policy_band(self, fast_scan_result: dict) -> Optional[str]:
+        """Apply filename policy to files discovered inside an archive."""
+        members = []
+        for hit in fast_scan_result.get("archive_sensitive_hits") or []:
+            member = hit.get("member") if isinstance(hit, dict) else ""
+            if member:
+                members.append(Path(str(member)).name.lower())
+        for match in fast_scan_result.get("yara_matches") or []:
+            member = match.get("archive_member") if isinstance(match, dict) else ""
+            if member:
+                members.append(Path(str(member)).name.lower())
+
+        keys = {self._normalize_filename(m) for m in members if m}
+        keys.discard("")
+        if not keys:
+            return None
+        if any(k in self._high_risk_names_norm for k in keys):
+            return "high"
+        if all(k in self._low_medium_names_norm for k in keys):
+            return "low_medium"
+        return None
+
+    def _apply_archive_member_scan_policy(self, fast_scan_result: dict) -> None:
+        """Suppress archive hits when all sensitive evidence comes from low/medium demo files."""
+        band = self._archive_member_policy_band(fast_scan_result)
+        if not band:
+            return
+
+        members = sorted({
+            Path(str(hit.get("member") or "")).name.lower()
+            for hit in (fast_scan_result.get("archive_sensitive_hits") or [])
+            if isinstance(hit, dict) and hit.get("member")
+        })
+        policy = {"policy": f"archive_member_{band}", "members": members}
+        fast_scan_result["archive_filename_policy"] = policy
+
+        if band == "low_medium":
+            fast_scan_result["archive_sensitive_hits_suppressed"] = fast_scan_result.get("archive_sensitive_hits") or []
+            fast_scan_result["yara_matches_suppressed"] = fast_scan_result.get("yara_matches") or []
+            fast_scan_result["archive_sensitive_hits"] = []
+            fast_scan_result["yara_matches"] = []
+            fast_scan_result["is_suspicious"] = False
+
+    def _apply_archive_member_risk_policy(self, risk_result: dict, fast_scan_result: dict) -> None:
+        policy = fast_scan_result.get("archive_filename_policy") or {}
+        if policy.get("policy") == "archive_member_low_medium":
+            adjusted = max(2.0, min(float(risk_result.get("total_score", 0.0)), 3.9))
+            risk_result["total_score"] = round(adjusted, 2)
+            risk_result["risk_level"] = "low" if adjusted < 4.0 else "medium"
+            risk_result["action"] = "log"
+            risk_result["cvss_score"] = round(adjusted, 2)
+            risk_result.setdefault("details", {})["archive_filename_policy"] = policy
+        elif policy.get("policy") == "archive_member_high":
+            adjusted = max(8.2, float(risk_result.get("total_score", 0.0)))
+            risk_result["total_score"] = round(min(10.0, adjusted), 2)
+            risk_result["risk_level"] = "high" if risk_result["total_score"] < 9.0 else "critical"
+            risk_result["action"] = "alert"
+            risk_result["cvss_score"] = round(float(risk_result["total_score"]), 2)
+            risk_result.setdefault("details", {})["archive_filename_policy"] = policy
+
     def _apply_filename_risk_policy(self, event: dict, risk_result: dict, fallback_name: str = ""):
         """
         Hardcoded policy by filename (ưu tiên cuối cùng trên thang điểm):
@@ -714,7 +774,10 @@ class DetectionEngine:
                         f"External transfer content-enriched scan: sample_len={len(sample_text)}, "
                         f"yara_matches={len(fast_scan_result.get('yara_matches', []))}"
                     )
-            
+
+            if file_path.suffix.lower() in {".zip", ".7z", ".rar"}:
+                self._apply_archive_member_scan_policy(fast_scan_result)
+             
             yara_matches = fast_scan_result.get('yara_matches', [])
 
             # 3.5 Bulk exfiltration features (demo: off-hours + many files/large total to USB/sensitive)
@@ -943,7 +1006,28 @@ class DetectionEngine:
                         risk_result['action'] = 'alert'
 
             self._apply_filename_risk_policy(event, risk_result, fallback_name=file_path.name)
-            
+            self._apply_archive_member_risk_policy(risk_result, fast_scan_result)
+            if (
+                file_path.suffix.lower() == ".zip"
+                and fast_scan_result.get("archive_scanned")
+                and not fast_scan_result.get("is_encrypted_zip")
+                and not fast_scan_result.get("archive_sensitive_hits")
+                and not fast_scan_result.get("yara_matches")
+                and fn_band != "high"
+            ):
+                cap = 4.9
+                if float(risk_result.get("total_score", 0.0)) > cap:
+                    risk_result["total_score"] = cap
+                    risk_result["cvss_score"] = cap
+                    risk_result["risk_level"] = "medium"
+                    risk_result["action"] = "log"
+                    risk_result.setdefault("details", {})["archive_clean_cap"] = {
+                        "cap": cap,
+                        "archive_entries": fast_scan_result.get("archive_entries"),
+                        "archive_scanned_files": fast_scan_result.get("archive_scanned_files"),
+                        "reason": "zip_scanned_no_sensitive_hits",
+                    }
+             
             # 7. Generate Report Fields
             report = self.report_generator.generate_report(
                 event,
@@ -961,7 +1045,7 @@ class DetectionEngine:
             dedup_key = file_hash
             if getattr(WorkerConfig, "ALERT_DEDUP_USE_SSDEEP", True) and ssdeep_sig:
                 dedup_key = f"ssdeep:{ssdeep_sig}"
-            if action == "alert" and dedup_key and dedup_sec > 0:
+            if action == "alert" and dedup_key and dedup_sec > 0 and cached_malicious_score is None:
                 last_alert = self._alert_dedup.get(dedup_key)
                 if last_alert is not None and (now_ts - last_alert) < dedup_sec:
                     suppress_alert = True
@@ -971,8 +1055,13 @@ class DetectionEngine:
                         f"Disable dedup: ALERT_DEDUP_SEC=0"
                     )
             exec_action = "log" if suppress_alert else action
-            if action == "alert" and not suppress_alert:
+            if action == "alert" and not suppress_alert and cached_malicious_score is None:
                 self._alert_dedup[dedup_key] = now_ts
+            elif action == "alert" and cached_malicious_score is not None:
+                logger.info(
+                    f"Known malicious hash alert bypassed dedup so Windows popup is still shown: "
+                    f"{file_path.name}, cached_score={cached_malicious_score:.1f}"
+                )
             self.action_executor.execute(
                 exec_action,
                 file_path,
@@ -1098,6 +1187,7 @@ class DetectionEngine:
             file_hash: str = ''
             ssdeep_sig: str = ''
             fn_band: Optional[str] = None
+            cached_malicious_score = None
             actual_size: int = size_bytes  # fallback từ network metadata
 
             panic_mode = self.queue_consumer.check_panic_mode()
@@ -1388,7 +1478,7 @@ class DetectionEngine:
                 dedup_key_bu = file_hash
             else:
                 dedup_key_bu = f"browser_upload:{filename}:{dest_domain}"
-            if action == 'alert' and dedup_key_bu and dedup_sec > 0:
+            if action == 'alert' and dedup_key_bu and dedup_sec > 0 and cached_malicious_score is None:
                 _last_bu = self._alert_dedup.get(dedup_key_bu)
                 if _last_bu is not None and (now_ts - _last_bu) < dedup_sec:
                     suppress_alert = True
@@ -1397,8 +1487,13 @@ class DetectionEngine:
                         f"key={str(dedup_key_bu)[:48]}…"
                     )
             exec_action_bu = 'log' if suppress_alert else action
-            if action == 'alert' and not suppress_alert:
+            if action == 'alert' and not suppress_alert and cached_malicious_score is None:
                 self._alert_dedup[dedup_key_bu] = now_ts
+            elif action == 'alert' and cached_malicious_score is not None:
+                logger.info(
+                    f"[PID={pid}] browser_upload known malicious hash bypassed dedup so Windows popup is still shown: "
+                    f"{filename!r}, cached_score={cached_malicious_score:.1f}"
+                )
 
             logger.info(
                 f"[PID={pid}] BrowserUpload scan complete: event_id={event_id} "
