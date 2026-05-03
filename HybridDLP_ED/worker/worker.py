@@ -242,16 +242,32 @@ class DetectionEngine:
 
     def _is_external_transfer_event(self, event: dict) -> bool:
         operation = event.get("operation", {}) or {}
+        raw_original = event.get("raw_original", {}) or {}
+        raw_operation = raw_original.get("operation", {}) or {}
         op_type = str(operation.get("op_type") or event.get("type") or "").lower()
         obj = event.get("object", {}) or {}
+        raw_obj = raw_original.get("object", {}) or {}
         dst_volume = str(
             operation.get("dest_volume_type")
+            or raw_operation.get("dest_volume_type")
             or obj.get("dest_volume_type")
+            or raw_obj.get("dest_volume_type")
             or obj.get("volume_type")
+            or raw_obj.get("volume_type")
             or ""
         ).lower()
-        semantic_hint = str(operation.get("dlp_semantic_hint") or "").lower()
-        semantic_action = str(operation.get("semantic_action") or "").lower()
+        semantic_hint = str(
+            operation.get("dlp_semantic_hint")
+            or raw_operation.get("dlp_semantic_hint")
+            or ""
+        ).lower()
+        semantic_action = str(
+            operation.get("semantic_action")
+            or raw_operation.get("semantic_action")
+            or ""
+        ).lower()
+        if semantic_hint == "local" and "external" not in op_type and "copy_to_removable" not in semantic_action:
+            return False
         return (
             "external" in op_type
             or "copy_to_removable" in semantic_action
@@ -307,8 +323,26 @@ class DetectionEngine:
         Heuristic: USB/removable/network/cloud/http destinations, or known sensitive domains in context.
         """
         ctx = event.get("context", {}) or {}
-        dest = str(event.get("destination") or ctx.get("destination") or "").lower()
+        operation = event.get("operation", {}) or {}
+        obj = event.get("object", {}) or {}
+        dest = str(
+            event.get("destination")
+            or ctx.get("destination")
+            or obj.get("dst_path")
+            or obj.get("path")
+            or obj.get("dest_drive")
+            or obj.get("drive")
+            or ""
+        ).lower()
+        dest_volume = str(
+            operation.get("dest_volume_type")
+            or obj.get("dest_volume_type")
+            or obj.get("volume_type")
+            or ""
+        ).lower()
         domain = str(ctx.get("domain") or "").lower()
+        if "removable" in dest_volume or "network" in dest_volume:
+            return True
         if any(k in dest for k in ("usb", "removable", "e:\\", "f:\\")):
             return True
         if "\\\\" in dest or "network" in dest:
@@ -559,29 +593,6 @@ class DetectionEngine:
             
             # ==== Xử lý File Events ====
             # Lấy file path từ nhiều nguồn có thể
-            file_path_str = (
-                event.get('path') or 
-                event.get('file_path') or 
-                event.get('object', {}).get('path') or
-                ''
-            )
-            
-            # Special events that don't have file path but need behavioral rules analysis
-            is_special_event = (
-                event_type in ['usb_connected', 'usb_mounted', 'usb_unmounted', 'volume_mounted', 'process_created', 'proc_start', 'proc_end', 'print_job']
-                # Network / exfil events without a local file path (browser_upload đã có handler riêng)
-                or event_type in [
-                    'http_upload',
-                    'file_upload',
-                    'network_upload',
-                    'network_flow',
-                    'network_flow_summary',
-                    'http_request',
-                    'cloud_exfiltration',
-                    'data_exfiltration',
-                ]
-            )
-
             if not file_path_str:
                 if is_special_event:
                     return self._process_special_event(event)
@@ -598,7 +609,13 @@ class DetectionEngine:
             
             # Check file size limit
             try:
-                size_bytes = event.get('size') or event.get('object', {}).get('size_bytes')
+                obj_meta = event.get('object', {}) or {}
+                size_bytes = (
+                    event.get('size')
+                    or event.get('size_bytes')
+                    or obj_meta.get('size_bytes')
+                    or obj_meta.get('size')
+                )
                 if size_bytes is None:
                     size_bytes = file_path.stat().st_size
                 file_size_mb = size_bytes / (1024 * 1024)
@@ -817,13 +834,22 @@ class DetectionEngine:
             ctx = event.get('context', {}) or {}
             
             # action_type: ưu tiên event_type từ agent, fallback type
-            action_type = event.get('event_type') or event.get('type', 'file_copy')
+            action_type = operation.get('op_type') or event.get('event_type') or event.get('type', 'file_copy')
             
             # destination: từ correlation events hoặc context
             destination = event.get('destination', '')
             if not destination and ctx:
                 # Có thể có thông tin destination trong context
                 destination = ctx.get('destination', '')
+            if not destination:
+                obj = event.get('object', {}) or {}
+                destination = (
+                    obj.get('dst_path')
+                    or obj.get('path')
+                    or obj.get('dest_drive')
+                    or obj.get('drive')
+                    or ''
+                )
             
             # user: từ context
             user = ctx.get('user') or event.get('user', 'unknown')

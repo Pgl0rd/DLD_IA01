@@ -514,9 +514,15 @@ class USBDataExfiltrationRule(BehavioralRule):
         # Read from both event and raw_original (per Noteupdate.txt event samples)
         raw_original = event.get('raw_original', {}) or {}
         raw_obj = raw_original.get('object', {}) or {}
+        operation = event.get('operation', {}) or {}
+        raw_operation = raw_original.get('operation', {}) or {}
         
         obj = event.get('object', {}) or {}
         dest_volume_type = (
+            operation.get('dest_volume_type') or
+            raw_operation.get('dest_volume_type') or
+            obj.get('dest_volume_type') or
+            raw_obj.get('dest_volume_type') or
             obj.get('volume_type') or
             raw_obj.get('volume_type') or
             event.get('Dest_Volume_Type') or
@@ -526,7 +532,11 @@ class USBDataExfiltrationRule(BehavioralRule):
         dest_path = (
             obj.get('dst_path') or
             raw_obj.get('dst_path') or
+            obj.get('path') or
+            raw_obj.get('path') or
             event.get('dst_path') or
+            event.get('path') or
+            event.get('file_path') or
             event.get('Dest_Path') or
             ''
         ).lower()
@@ -537,6 +547,14 @@ class USBDataExfiltrationRule(BehavioralRule):
             raw_obj.get('drive') or
             ''
         ).lower()
+
+        op_type = str(operation.get('op_type') or raw_operation.get('op_type') or event.get('type') or '').lower()
+        semantic_hint = str(
+            operation.get('dlp_semantic_hint') or raw_operation.get('dlp_semantic_hint') or ''
+        ).lower()
+        semantic_action = str(
+            operation.get('semantic_action') or raw_operation.get('semantic_action') or ''
+        ).lower()
         
         is_removable = (
             dest_volume_type and 'removable' in str(dest_volume_type).lower()
@@ -545,6 +563,15 @@ class USBDataExfiltrationRule(BehavioralRule):
         )
         
         if not is_removable:
+            return False, {}
+        is_transfer = (
+            'external' in op_type
+            or 'copy_to_removable' in semantic_action
+            or 'external_transfer' in semantic_hint
+        )
+        if semantic_hint == 'local' and not is_transfer:
+            return False, {}
+        if not is_transfer and event.get('type') not in {'file_created', 'file_moved', 'file_renamed'}:
             return False, {}
         
         # Check có YARA match hoặc file sensitivity (per Noteupdate.txt: object.sensitivity = "confidential")

@@ -5,7 +5,10 @@ Panic mode theo độ sâu queue (Noteupdate: overload protection).
 from __future__ import annotations
 
 import os
+import json
+import sqlite3
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from loguru import logger
@@ -30,6 +33,14 @@ class SQLiteQueueConsumer:
         self.pid = os.getpid()
         db_path = getattr(WorkerConfig, "AGENT_STORE_DB", None) or WorkerConfig.RUNTIME_DIR / "agent_store.db"
         self._queue = PersistentEventQueue(db_path=db_path)
+        self._events_db_path = WorkerConfig.EVENTS_DB_PATH
+        self._events_db_fallback = os.getenv("WORKER_EVENTS_DB_FALLBACK", "1").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self._events_db_last_id = self._init_events_db_last_id()
         self.panic_mode = False
         self.queue_size = 0
         self._panic_on = int(getattr(WorkerConfig, "PANIC_MODE_THRESHOLD", 1000))
@@ -48,8 +59,129 @@ class SQLiteQueueConsumer:
         self._last_panic_mode_written: Optional[bool] = None
         logger.info(
             f"[PID={self.pid}] SQLiteQueueConsumer: db={db_path}, "
+            f"events_db_fallback={self._events_db_fallback}, "
+            f"events_db_last_id={self._events_db_last_id}, "
             f"panic_on={self._panic_on}, panic_off={self._panic_off}"
         )
+
+    def _init_events_db_last_id(self) -> int:
+        if not self._events_db_fallback or not self._events_db_path.exists():
+            return 0
+        from_id = os.getenv("WORKER_EVENTS_DB_FALLBACK_FROM_ID", "").strip()
+        if from_id:
+            try:
+                return max(0, int(from_id))
+            except ValueError:
+                pass
+        stored_last_id = 0
+        try:
+            stored = self._queue.get_state("worker_events_db_fallback")
+            if isinstance(stored, dict):
+                stored_last_id = int(stored.get("last_id") or 0)
+        except Exception:
+            stored_last_id = 0
+        try:
+            with sqlite3.connect(str(self._events_db_path), timeout=5.0) as conn:
+                try:
+                    lookback_min = float(os.getenv("WORKER_EVENTS_DB_FALLBACK_LOOKBACK_MIN", "30"))
+                except ValueError:
+                    lookback_min = 30.0
+                if lookback_min > 0:
+                    cutoff = (datetime.now(timezone.utc) - timedelta(minutes=lookback_min)).isoformat()
+                    row = conn.execute(
+                        """
+                        SELECT MIN(id)
+                        FROM events
+                        WHERE ts >= ?
+                          AND type != 'heartbeat'
+                          AND (
+                            payload_json LIKE '%file_copy_external%'
+                            OR payload_json LIKE '%copy_to_removable%'
+                            OR payload_json LIKE '%external_transfer%'
+                            OR payload_json LIKE '%"dest_volume_type": "Removable"%'
+                            OR payload_json LIKE '%"dest_volume_type":"Removable"%'
+                            OR payload_json LIKE '%"dest_volume_type": "Network"%'
+                            OR payload_json LIKE '%"dest_volume_type":"Network"%'
+                          )
+                        """,
+                        (cutoff,),
+                    ).fetchone()
+                    if row and row[0] is not None:
+                        return max(stored_last_id, int(row[0]) - 1)
+                row = conn.execute("SELECT MAX(id) FROM events").fetchone()
+                return max(stored_last_id, int(row[0] or 0))
+        except Exception:
+            return stored_last_id
+
+    def _get_external_event_from_events_db(self) -> Optional[Dict[str, Any]]:
+        if not self._events_db_fallback or not self._events_db_path.exists():
+            return None
+        try:
+            conn = sqlite3.connect(str(self._events_db_path), timeout=5.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA read_uncommitted=1;")
+                conn.execute("PRAGMA busy_timeout=5000;")
+            except Exception:
+                pass
+            row = conn.execute(
+                """
+                SELECT id, ts, type, severity, source, payload_json
+                FROM events
+                WHERE id > ?
+                  AND type != 'heartbeat'
+                  AND (
+                    payload_json LIKE '%file_copy_external%'
+                    OR payload_json LIKE '%copy_to_removable%'
+                    OR payload_json LIKE '%external_transfer%'
+                    OR payload_json LIKE '%"dest_volume_type": "Removable"%'
+                    OR payload_json LIKE '%"dest_volume_type":"Removable"%'
+                    OR payload_json LIKE '%"dest_volume_type": "Network"%'
+                    OR payload_json LIKE '%"dest_volume_type":"Network"%'
+                  )
+                ORDER BY id ASC
+                LIMIT 1
+                """,
+                (self._events_db_last_id,),
+            ).fetchone()
+            conn.close()
+            if not row:
+                return None
+
+            events_db_id = int(row["id"])
+            self._events_db_last_id = events_db_id
+            try:
+                self._queue.set_state(
+                    "worker_events_db_fallback",
+                    {"last_id": events_db_id, "ts": time.time()},
+                )
+            except Exception:
+                pass
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except Exception:
+                return None
+
+            event_type = payload.get("type") or row["type"]
+            event = {
+                "event_id": payload.get("event_id") or str(events_db_id),
+                "timestamp": row["ts"],
+                "type": event_type,
+                "event_type": event_type,
+                "ts": row["ts"],
+                "severity": row["severity"],
+                "source": row["source"],
+                **payload,
+                "_events_db_id": events_db_id,
+            }
+            logger.warning(
+                f"[PID={self.pid}] Fallback dequeued events.db id={events_db_id} type={event_type}"
+            )
+            return event
+        except Exception as e:
+            logger.debug(f"[PID={self.pid}] events.db fallback read failed: {e}")
+            return None
 
     def _refresh_panic(self, pending: int, now: float) -> None:
         changed = False
@@ -96,6 +228,9 @@ class SQLiteQueueConsumer:
                     f"[PID={self.pid}] Dequeued event id={_qid} type={et}"
                 )
                 return event
+            fallback_event = self._get_external_event_from_events_db()
+            if fallback_event:
+                return fallback_event
             time.sleep(0.02)
         return None
 
@@ -121,4 +256,6 @@ class SQLiteQueueConsumer:
             "queue_size": n,
             "panic_mode": self.panic_mode,
             "queue_type": "sqlite",
+            "events_db_fallback": self._events_db_fallback,
+            "events_db_last_id": self._events_db_last_id,
         }
