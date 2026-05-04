@@ -288,6 +288,15 @@ class ContentAggregationTracker:
             'anomaly_threshold': self.config.ml_anomaly_threshold
         })
         
+        # Layer 3: FastScanEngine for YARA (khởi tạo 1 lần)
+        self._fast_scan = None
+        try:
+            from worker.core.fast_scan import FastScanEngine
+            self._fast_scan = FastScanEngine()
+            logger.info("Loaded FastScanEngine for YARA")
+        except ImportError as e:
+            logger.warning(f"FastScanEngine not available: {e}")
+        
         # State
         self.user_assemblies: Dict[str, List[DocumentAssembly]] = defaultdict(list)
         self.global_entity_accumulation: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
@@ -921,10 +930,11 @@ class ContentAggregationTracker:
             # 4. YARA scan
             yara_matches = []
             try:
-                from worker.core.fast_scan import FastScanEngine
-                fast_scan = FastScanEngine()
-                yara_result = fast_scan.scan_text_content(combined_content, panic_mode=False)
-                yara_matches = yara_result.get('yara_matches', [])
+                if self._fast_scan:
+                    yara_result = self._fast_scan.scan_text_content(combined_content, panic_mode=False)
+                    yara_matches = yara_result.get('yara_matches', [])
+                else:
+                    logger.debug("[RescanUser] FastScan not available, skipping YARA scan")
             except Exception as e:
                 logger.warning(f"[RescanUser] YARA failed: {e}")
             
@@ -1079,14 +1089,19 @@ class ContentAggregationTracker:
             # 4. YARA scan - Bổ sung pattern matching
             yara_matches = []
             try:
-                from worker.core.fast_scan import FastScanEngine
-                fast_scan = FastScanEngine()
-                yara_result = fast_scan.scan_text_content(combined_content, panic_mode=False)
-                yara_matches = yara_result.get('yara_matches', [])
-                logger.info(
-                    f"[AggregationRescan] YARA scan on {len(combined_parts)} fragments: "
-                    f"{len(yara_matches)} matches"
-                )
+                if self._fast_scan:
+                    yara_result = self._fast_scan.scan_text_content(combined_content, panic_mode=False)
+                    yara_matches = yara_result.get('yara_matches', [])
+                    logger.info(
+                        f"[AggregationRescan] YARA scan on {len(combined_parts)} fragments: "
+                        f"{len(yara_matches)} matches"
+                    )
+                else:
+                    # Fallback: try import
+                    from worker.core.fast_scan import FastScanEngine
+                    fast_scan = FastScanEngine()
+                    yara_result = fast_scan.scan_text_content(combined_content, panic_mode=False)
+                    yara_matches = yara_result.get('yara_matches', [])
             except Exception as yara_err:
                 logger.warning(f"[AggregationRescan] YARA scan failed: {yara_err}")
             

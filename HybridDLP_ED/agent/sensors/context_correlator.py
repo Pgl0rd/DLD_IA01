@@ -758,43 +758,51 @@ class ContextCorrelator:
     def _check_screenshot_browser_count(self, evt: Dict[str, Any], now_unix: float) -> Optional[Dict[str, Any]]:
         """
         Hard-coded rule: Nếu user screenshot hoặc paste vào browser >= 10 lần trong 1 giờ
-        → Đẩy risk score lên 9.3 (Critical)
+        → Risk score dynamic theo destination và content (không còn 9.3 cứng).
+
+        Phân loại:
+        - GPT/AI tools (chatgpt, claude, gemini...): HIGH (8.0-9.0)
+        - Social/Messenger (facebook, messenger, discord...): MEDIUM-HIGH (6.5-8.0)
+        - Generic browser / unknown dest: MEDIUM (4.5-6.5)
+        - Normal app screenshot (không paste): LOW (3.5-5.0)
         """
         etype = _evt_type(evt)
-        
+
         # Check if this is a screenshot or browser paste
         is_screenshot = etype == "screenshot"
         is_browser_paste = self._is_browser_paste_event(evt)
-        
+
         if not (is_screenshot or is_browser_paste):
             return None
-        
+
         # Get user
         user = _evt_actor_user(evt) or "unknown"
-        
+
         # Reset counter nếu window đã hết hoặc user khác
         if now_unix - self._scr_browser_last_ts > self._scr_browser_window_sec:
             self._scr_browser_count = 0
             self._scr_browser_user = user
-        
+
         # Reset nếu user khác
         if user != self._scr_browser_user:
             self._scr_browser_count = 0
             self._scr_browser_user = user
-        
+
         # Tăng counter
         self._scr_browser_count += 1
         self._scr_browser_last_ts = now_unix
-        
+
         event_desc = "Screenshot capture" if is_screenshot else "Browser paste"
         self._dbg(f"[HardCode Rule] {event_desc} #{self._scr_browser_count}/10 by {user}")
-        
-        # Nếu đến lần thứ 10
+
+        # Nếu đến lần thứ 10 → tính risk score dynamic
         if self._scr_browser_count >= 10:
+            risk_score, severity_label = self._dynamic_screenshot_risk_score(evt, is_screenshot)
+
             corr_raw = {
                 "type": "corr_screenshot_browser_excessive",
                 "source": "correlator",
-                "severity": _sev("critical"),
+                "severity": _sev("critical") if risk_score >= 8.0 else _sev("high"),
                 "ts": _iso_from_ts(now_unix),
                 "tags": ["corr_screenshot_browser", "excessive_activity", "hardcoded_rule"],
                 "actor": self._build_actor(evt),
@@ -817,17 +825,83 @@ class ContextCorrelator:
                         "window_title": _evt_window_title(evt),
                         "dest_app": _evt_clipboard_dest_app(evt),
                         "dest_domain": _evt_dest_domain(evt),
+                        "risk_bucket": severity_label,
                     },
-                    "hardcoded_risk_score": 9.3,
-                    "hardcoded_risk_level": "critical",
+                    "hardcoded_risk_score": round(risk_score, 2),
+                    "hardcoded_risk_level": severity_label,
                     "rule_trigger": "screenshot_browser_excessive_10times_1hour",
                 },
             }
             # Reset counter sau khi trigger
             self._scr_browser_count = 0
             return corr_raw
-        
+
         return None
+
+    # ─── Sensitive domain / dest helpers ───────────────────────────────────
+    _SENSITIVE_DOMAINS = frozenset({
+        "chat.openai.com", "chatgpt.com", "chatgpt.ai",
+        "claude.ai", "claude.de", "claude.com",
+        "gemini.google.com", "bard.google.com",
+        "poe.com", "perplexity.ai", "copilot.microsoft.com",
+        "phind.com", "you.com",
+    })
+    _SOCIAL_DOMAINS = frozenset({
+        "facebook.com", "messenger.com", "instagram.com",
+        "twitter.com", "x.com", "linkedin.com",
+        "reddit.com", "threads.net",
+        "discord.com", "telegram.org", "web.telegram.org",
+        "whatsapp.com", "signal.org",
+        "youtube.com", "tiktok.com",
+    })
+    _BROWSER_PROCS = frozenset({
+        "chrome.exe", "msedge.exe", "firefox.exe",
+        "opera.exe", "brave.exe", "vivaldi.exe",
+    })
+
+    def _dynamic_screenshot_risk_score(
+        self, evt: Dict[str, Any], is_screenshot: bool
+    ) -> Tuple[float, str]:
+        """
+        Tính risk score dynamic dựa trên:
+        1. Destination: GPT/AI > Social > Browser > Normal
+        2. Screenshot only (local) vs paste to external destination
+        """
+        dest_domain = _evt_dest_domain(evt)
+        dest_app = _evt_clipboard_dest_app(evt)
+        dest_app_lower = dest_app.lower() if dest_app else ""
+
+        # 1) AI/GPT domain — highest risk
+        if dest_domain and dest_domain in self._SENSITIVE_DOMAINS:
+            return 8.5, "high_critical"
+        if dest_domain and any(d in dest_domain for d in ("openai", "anthropic", "chatgpt", "claude", "gemini", "bard", "poe", "perplexity")):
+            return 8.5, "high_critical"
+
+        # 2) Social/Messenger — high risk (paste sensitive content to public platform)
+        if dest_domain and dest_domain in self._SOCIAL_DOMAINS:
+            return 7.5, "high"
+        if dest_domain and any(d in dest_domain for d in ("facebook", "messenger", "discord", "telegram", "whatsapp", "twitter", "instagram", "linkedin")):
+            return 7.5, "high"
+
+        # 3) Browser destination (generic upload/cloud)
+        if dest_domain and any(
+            d in dest_domain
+            for d in ("drive.google", "dropbox", "onedrive", "mega", "box.com",
+                      "wetransfer", "mediafire", "sendspace", "pastebin", "gist.github",
+                      "gitlab", "bitbucket", "replit")
+        ):
+            return 6.5, "medium_high"
+
+        # 4) Browser process (paste to browser app) — medium
+        if any(browser in dest_app_lower for browser in self._BROWSER_PROCS):
+            return 5.5, "medium"
+
+        # 5) Local screenshot only (no external paste) — lower risk
+        if is_screenshot:
+            return 4.0, "low_medium"
+
+        # 6) Unknown destination — medium-low
+        return 4.5, "low_medium"
 
     def _classify_network_target(self, evt: Dict[str, Any]) -> Dict[str, Any]:
         dest_domain = _evt_dest_domain(evt)

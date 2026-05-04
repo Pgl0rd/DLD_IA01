@@ -46,7 +46,20 @@ def score_user_context(ctx: Dict[str, Any]) -> float:
 
 
 def score_time_context(ctx: Dict[str, Any]) -> float:
-    """0–10 — ngoài giờ làm việc tăng điểm."""
+    """0–10 — ngoài giờ làm việc tăng điểm.
+    
+    Ưu tiên flag outside_working_hours từ agent (đã parse đúng local time +7).
+    Fallback sang parse timestamp UTC nếu flag không có.
+    """
+    ev = ctx.get("_event_data") or {}
+    agent_ctx = ev.get("context") or {}
+    
+    # Ưu tiên 1: flag từ agent (đáng tin cậy hơn — agent parse local time)
+    agent_ooh = agent_ctx.get("outside_working_hours")
+    if isinstance(agent_ooh, bool):
+        return 6.5 if agent_ooh else 1.5
+    
+    # Fallback 2: parse timestamp trực tiếp từ ctx.time
     dt = _parse_ts(ctx)
     if dt is None:
         return 1.8

@@ -37,6 +37,8 @@ from core.report_generator import ReportGenerator
 from core.behavioral_rules import BehavioralRulesEngine
 from core.file_stability import wait_until_file_stable
 from core.ocr_setup import ensure_tesseract
+from core.clipboard_event_buffer import ClipboardEventBuffer
+from core.alert_flow_config import AlertFlowConfig
 from database.processed_events_db import ProcessedEventsDB
 # Import ML module from ML folder
 ML_DIR = Path(__file__).parent.parent / "ML"
@@ -121,6 +123,10 @@ class DetectionEngine:
         self._ml_analyzer = None
         # Content Aggregation Tracker — phát hiện fragmented exfiltration
         self._aggregation_tracker = None
+        
+        # Clipboard Event Buffer — smart alert suppression
+        self._clipboard_buffer = ClipboardEventBuffer()
+        
         self._correlator, self._pqueue = _make_correlator_and_pqueue()
         self.processed_events_db = ProcessedEventsDB(WorkerConfig.WORKER_DIR / "database")
         # Chống alert trùng cùng SHA-256 trong cửa sổ thời gian (Noteupdate §19)
@@ -2062,11 +2068,86 @@ class DetectionEngine:
                 dummy_path
             )
             
-            # 6. Action Executor
+            # ==== SMART ALERT SUPPRESSION ====
+            # Luồng đúng: YARA → Buffer → ML/NLP → Alert (nếu thực sự suspicious)
+            _smart_alert = WorkerConfig.SMART_ALERT_ENABLED
             action = risk_result['action']
             event_id = event.get('event_id', 'unknown')
+            user = ctx.get('user') or event.get('actor', {}).get('user', 'unknown')
             pid = os.getpid()
             
+            # 1. YARA Direct Match → ALWAYS alert (không suppress)
+            has_critical_yara = AlertFlowConfig.should_alert_on_yara(yara_matches)
+            
+            if has_critical_yara:
+                # YARA match rõ ràng → force alert
+                action = 'alert'
+                risk_result['action'] = 'alert'
+                if risk_result['total_score'] < AlertFlowConfig.DIRECT_YARA_MIN_SCORE:
+                    risk_result['total_score'] = AlertFlowConfig.DIRECT_YARA_MIN_SCORE
+                    if "cvss_score" in risk_result:
+                        risk_result["cvss_score"] = AlertFlowConfig.DIRECT_YARA_MIN_SCORE
+                logger.warning(
+                    f"[PID={pid}] YARA CRITICAL MATCH → FORCED ALERT: "
+                    f"event_id={event_id}, rules={[m.get('rule') for m in yara_matches]}"
+                )
+            
+            # 2. Behavioral Rule Match Only → SUPPRESS (need YARA support)
+            elif _smart_alert and WorkerConfig.SUPPRESS_SINGLE_ACTION:
+                has_behavioral_only = (
+                    behavioral_risk_boost > 0 and 
+                    len(yara_matches) == 0 and
+                    not ml_anomaly_result.get('is_anomaly', False) and
+                    not aggregation_alert
+                )
+                
+                if has_behavioral_only:
+                    # Behavioral without content evidence → suppress alert, just log
+                    action = 'log'
+                    risk_result['action'] = 'log'
+                    logger.info(
+                        f"[PID={pid}] SUPPRESSED (Behavioral only, no content evidence): "
+                        f"event_id={event_id}, behavior_score={behavioral_risk_boost:.1f}, "
+                        f"destination={window_title[:50]}"
+                    )
+            
+            # 3. Buffer for aggregation analysis
+            if _smart_alert and action == 'log':
+                # Add to buffer for future analysis
+                self._clipboard_buffer.add_event(event, yara_matches)
+                buffer_size = self._clipboard_buffer.get_buffer_size(str(user).lower())
+                
+                # Check if should analyze buffer
+                should_analyze, reason = self._clipboard_buffer.should_analyze(str(user).lower())
+                if should_analyze:
+                    analysis = self._clipboard_buffer.analyze_buffer(str(user).lower())
+                    self._clipboard_buffer.mark_analyzed(str(user).lower())
+                    logger.info(
+                        f"[PID={pid}] Buffer Analysis for {user}: "
+                        f"events={analysis.get('event_count', 0)}, "
+                        f"should_alert={analysis.get('should_alert', False)}, "
+                        f"reason={analysis.get('reason', 'N/A')}"
+                    )
+                    
+                    if analysis.get('should_alert', False):
+                        # Override action based on buffer analysis
+                        action = 'alert'
+                        risk_result['action'] = 'alert'
+                        # Update score based on analysis
+                        new_score = max(
+                            risk_result['total_score'],
+                            AlertFlowConfig.get_alert_threshold()
+                        )
+                        risk_result['total_score'] = new_score
+                        if "cvss_score" in risk_result:
+                            risk_result["cvss_score"] = new_score
+                        logger.warning(
+                            f"[PID={pid}] BUFFER ANALYSIS → ALERT TRIGGERED: "
+                            f"event_id={event_id}, reason={analysis.get('reason')}, "
+                            f"confidence={analysis.get('confidence', 0):.0%}"
+                        )
+            
+            # Log final decision
             logger.info(
                 f"[PID={pid}] Clipboard processing complete: "
                 f"event_id={event_id}, action={action.upper()}, "
@@ -2076,6 +2157,7 @@ class DetectionEngine:
                 f"window_title={window_title[:50]}"
             )
             
+            # 6. Action Executor
             self.action_executor.execute(
                 action,
                 dummy_path,
@@ -2436,7 +2518,8 @@ class DetectionEngine:
                 'location': 'special_event',
                 'file_size_mb': 0,
                 'process_name': ctx.get('fg_app') or event.get('process', {}).get('name') or operation.get('tool') or '',
-                'active_window': ctx.get('window_title') or '',
+                'active_window': ctx.get('window_title') or
+                                 (event.get('process', {}).get('window_title') if event_type in ('proc_start', 'proc_end') else ''),
                 'domain': '',
                 'event_id': event_id,
                 'source': event.get('source', 'unknown'),

@@ -104,6 +104,16 @@ def compute_content_sensitivity(
     if fast_scan_result.get("is_suspicious"):
         score += 1.0
 
+    # Sensitivity label từ EDR sensor (object.sensitivity = "Sensitive" / "Highly Sensitive")
+    # Nhẹ hơn YARA vì đây là classification heuristics, không phải pattern match thực sự.
+    # Tránh false-negative cho file đã được EDR đánh dấu nhưng YARA chưa detect.
+    obj = event_data.get("object") or {}
+    sens = str(obj.get("sensitivity") or "").lower()
+    if sens in ("sensitive", "highly sensitive"):
+        score += 1.0
+    elif sens == "normal":
+        score -= 0.5  # Giảm nhẹ cho file được đánh dấu rõ ràng là normal
+
     return _clamp(score)
 
 
@@ -157,15 +167,23 @@ def compute_confidence(
 ) -> float:
     """0–10 — độ tin cậy detection (YARA mạnh → cao)."""
     yara_n = len(fast_scan_result.get("yara_matches") or [])
-    if yara_n == 0 and not fast_scan_result.get("is_suspicious"):
-        return 2.2
+    is_suspicious = fast_scan_result.get("is_suspicious", False)
+
+    # Verified detection: YARA matches → confidence cao
     if yara_n >= 3:
         return 9.2
     if yara_n >= 1:
         return 7.2
+
+    # Encrypted / hidden content: không đọc được → confidence cao hơn unknown
+    if is_suspicious:
+        return 5.5  # encrypted zip hoặc suspicious archive
+
+    # Content chưa verify được (không YARA, không suspicious)
+    # Confidence floor giảm từ 2.2 → 1.0 để tránh inflate base score
     if deep_analysis_result.get("is_sensitive"):
-        return 6.5
-    return 5.5
+        return 6.5  # ML đã xác nhận sensitive
+    return 1.0
 
 
 def compute_base_score(

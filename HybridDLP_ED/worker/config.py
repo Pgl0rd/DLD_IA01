@@ -121,7 +121,7 @@ class WorkerConfig:
         # System requirement: alert-only (no blocking). Keep key for compatibility but make it unreachable.
         'block': 10**9,
         # CVSS > 3.9 cần xử lý ⇒ mặc định 4.0
-        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 4.0, 3.0, 8.5),
+        'alert': _env_float_bounded("RISK_ALERT_THRESHOLD", 3.0, 3.0, 8.5),
         'log': 0
     }
     # Chỉ hiện popup Windows khi risk đủ cao (giảm spam cảnh báo UI).
@@ -314,6 +314,34 @@ class WorkerConfig:
             if rule_file.is_file():
                 rules[rule_file.stem] = str(rule_file)
         return rules
+    
+    # Alert Flow Control (Smart Alert Suppression)
+    # Khi True: chỉ alert khi có đủ evidence, tránh spam
+    SMART_ALERT_ENABLED = os.getenv("SMART_ALERT_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    
+    # Số events tối thiểu để trigger alert (tránh alert 1 action)
+    ALERT_MIN_EVENTS = int(os.getenv("ALERT_MIN_EVENTS", "3"))
+    
+    # Suppress single-action alerts (chỉ alert khi có pattern)
+    SUPPRESS_SINGLE_ACTION = os.getenv("SUPPRESS_SINGLE_ACTION", "1").strip().lower() in {"1", "true", "yes", "on"}
+    
+    # YARA direct match → alert immediately (không cần buffer)
+    ALERT_ON_DIRECT_YARA = os.getenv("ALERT_ON_DIRECT_YARA", "1").strip().lower() in {"1", "true", "yes", "on"}
+    
+    # Critical YARA patterns → always alert
+    CRITICAL_YARA_PATTERNS = {
+        'id', 'cmnd', 'cccd', 'passport',
+        'credit', 'card', 'cvv',
+        'api_key', 'secret_key', 'private_key',
+        'ssn', 'social_security',
+    }
+    
+    # Demo mode: giảm threshold để dễ thấy alerts
+    DEMO_MODE = os.getenv("DEMO_MODE", "0").strip().lower() in {"1", "true", "yes", "on"}
+    DEMO_ALERT_THRESHOLD = float(os.getenv("DEMO_ALERT_THRESHOLD", "5.0"))
+    
+    # Buffer window cho aggregation (giây)
+    AGGREGATION_WINDOW_SEC = int(os.getenv("AGGREGATION_WINDOW_SEC", "300"))
     
     @classmethod
     def ensure_directories(cls):

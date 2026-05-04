@@ -740,7 +740,7 @@ def main() -> None:
             queue_manager=qm,
             poll_interval_sec=0.5,
             watch_names=proc_watch,
-            emit_end=True,
+            emit_end=False,  # Disabled: proc_end events not needed for DLP detection
             include_cmdline=True,
             include_parent=True,
             include_username=True,

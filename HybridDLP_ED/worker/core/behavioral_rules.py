@@ -1249,11 +1249,37 @@ class ProcessAnomalyRule(BehavioralRule):
     def check(self, event: Dict[str, Any], fast_scan_result: Dict[str, Any]) -> Tuple[bool, Dict[str, Any]]:
         """Check process anomaly (per Noteupdate.txt Rule 10)"""
         event_type = event.get('type', '').lower()
-        if event_type not in ['proc_start', 'process_created']:
+        if event_type not in ['proc_start', 'proc_end', 'process_created']:
             return False, {}
 
         raw_original = event.get('raw_original', {}) or {}
         ioc_hits = event.get('ioc_hits') or raw_original.get('ioc_hits') or []
+
+        ctx = event.get('context', {}) or {}
+        raw_ctx = raw_original.get('context', {}) or {}
+
+        proc = event.get('process', {}) or {}
+        actor = event.get('actor', {}) or {}
+        raw_actor = raw_original.get('actor', {}) or {}
+
+        proc_name = (
+            actor.get('process')
+            or raw_actor.get('process')
+            or proc.get('name')
+            or ''
+        )
+        cmdline = (
+            actor.get('cmdline')
+            or raw_actor.get('cmdline')
+            or proc.get('cmdline')
+            or ''
+        )
+        window_title = (
+            ctx.get('window_title')
+            or raw_ctx.get('window_title')
+            or proc.get('window_title')
+            or ''
+        )
 
         # High-risk tags expected in ioc_hits (from cmdline IOC patterns)
         high_risk_ioc_tags = {
@@ -1263,7 +1289,6 @@ class ProcessAnomalyRule(BehavioralRule):
         }
 
         # High-risk tags that appear in the top-level tags[] list
-        # (set by _tags_for_name_and_path in process_sensor)
         high_risk_process_tags = {
             'file_transfer_tool', 'archive_tool', 'screen_capture_tool',
         }
@@ -1284,28 +1309,13 @@ class ProcessAnomalyRule(BehavioralRule):
         if not all_matched:
             return False, {}
 
-        actor = event.get('actor', {}) or {}
-        raw_actor = raw_original.get('actor', {}) or {}
-        proc = event.get('process', {}) or {}
-        proc_name = (
-            actor.get('process')
-            or raw_actor.get('process')
-            or proc.get('name')
-            or ''
-        )
-        cmdline = (
-            actor.get('cmdline')
-            or raw_actor.get('cmdline')
-            or proc.get('cmdline')
-            or ''
-        )
-
         return True, {
             'rule_name': self.name,
             'severity': self.severity,
             'matched_tags': all_matched,
             'process': proc_name,
             'cmdline': cmdline,
+            'window_title': window_title,
             'reason': f"Process bất thường ({proc_name}): {', '.join(all_matched)}"
         }
 
