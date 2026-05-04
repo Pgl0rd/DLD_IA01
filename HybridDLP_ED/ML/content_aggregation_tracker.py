@@ -70,24 +70,23 @@ class AggregationConfig:
 @dataclass
 class ContentFragment:
     """Một content fragment được track"""
+    # Required fields (no defaults) - must come first
     fragment_id: str
     user: str
     timestamp: float
     event_type: str
     destination: str
-    
-    # ML Analysis Results (the key differentiator)
-    ml_analysis: MLAnalysisResult
-    
-    # Combined Score (ML + Rules)
+    ml_analysis: MLAnalysisResult  # Required ML result
     ml_score: float
     rule_score: float
     combined_score: float
-    
-    # Metadata
     raw_content_hash: str
-    content_preview: str  # First 100 chars
-    raw_content: str = ""  # Full content để phục vụ rescan
+    
+    # Fields with defaults - come after required fields
+    iso_anomaly_score: float = 0.0  # IsolationForest anomaly score
+    iso_model_score: float = 0.0    # IsolationForest model score
+    content_preview: str = ""        # First 100 chars
+    raw_content: str = ""            # Full content để phục vụ rescan
     
     def to_dict(self) -> Dict:
         return {
@@ -100,7 +99,10 @@ class ContentFragment:
             'ml_score': round(self.ml_score, 3),
             'rule_score': round(self.rule_score, 3),
             'combined_score': round(self.combined_score, 3),
-            'content_preview': self.content_preview,
+            # Layer 1: IsolationForest
+            'iso_anomaly_score': round(self.iso_anomaly_score, 3),
+            'iso_model_score': round(self.iso_model_score, 3),
+            'content_preview': self.content_preview[:100] if self.content_preview else "",
             'raw_content_length': len(self.raw_content) if self.raw_content else 0
         }
 
@@ -254,17 +256,32 @@ class ContentAggregationTracker:
     """
     ML-Powered Content Aggregation Tracker.
     
-    KEY DIFFERENCE FROM RULE-BASED:
-    - Không dùng hard-coded thresholds
-    - ML học baseline của user
-    - ML phát hiện semantic relationships
-    - Probabilistic risk assessment
+    DESIGN:
+    - Layer 1: IsolationForest (BehavioralMLAnalyzer) - phát hiện user bất thường
+    - Layer 2: Content Similarity (TF-IDF) - gom fragments liên quan
+    - Layer 3: Rule-Based (YARA/NLP) - detect keywords + destination sensitive
+    - Layer 4: Correlation - kết hợp tất cả → alert
+    
+    KEY FEATURES:
+    - Không dùng hard-coded thresholds cho ML
+    - ML học baseline của user (IsolationForest)
+    - ML phát hiện semantic relationships (TF-IDF)
+    - Probabilistic risk assessment (IsolationForest + Rule-Based)
     """
     
     def __init__(self, config: Optional[AggregationConfig] = None):
         self.config = config or AggregationConfig()
         
-        # Initialize ML Components
+        # ML Layer 1: IsolationForest - phát hiện user bất thường
+        try:
+            from ML.behavioral_ml_analyzer import BehavioralMLAnalyzer
+            self.isolation_forest = BehavioralMLAnalyzer()
+            logger.info("Loaded IsolationForest (BehavioralMLAnalyzer)")
+        except ImportError:
+            logger.warning("BehavioralMLAnalyzer not available, using fallback")
+            self.isolation_forest = None
+        
+        # ML Layer 2: Content similarity + NLP
         self.ml_analyzer = MLContentAnalyzer({
             'vectorizer': 'tfidf',
             'sensitivity_threshold': self.config.ml_sensitivity_threshold,
@@ -286,12 +303,23 @@ class ContentAggregationTracker:
         """
         Process event through ML pipeline.
         
-        ML Pipeline:
-        1. Extract content
-        2. Run ML analysis (semantic + anomaly)
-        3. Check fragment linking
-        4. Combine scores
-        5. Generate alert if needed
+        ML PIPELINE (4 Layers):
+        ┌──────────────────────────────────────────────────────────────┐
+        │ Layer 1: ISOLATION FOREST (BehavioralMLAnalyzer)            │
+        │   → Feature extraction + IsolationForest predict           │
+        │   → anomaly_score (0-10) cho user behavior                 │
+        ├──────────────────────────────────────────────────────────────┤
+        │ Layer 2: CONTENT ANALYSIS (MLContentAnalyzer)               │
+        │   → TF-IDF similarity → semantic categories                │
+        │   → Content fingerprint + fragment linking                  │
+        ├──────────────────────────────────────────────────────────────┤
+        │ Layer 3: RULE-BASED (YARA + NLP)                          │
+        │   → rescan_assembled_content() → entities + keywords       │
+        ├──────────────────────────────────────────────────────────────┤
+        │ Layer 4: CORRELATION + ALERT                               │
+        │   → Kết hợp: IsolationForest + Rule-Based                │
+        │   → Trigger alert khi: anomaly + sensitive content         │
+        └──────────────────────────────────────────────────────────────┘
         """
         with self._lock:
             # Extract content
@@ -299,18 +327,38 @@ class ContentAggregationTracker:
             if not content:
                 return None
             
-            # Run ML Analysis
-            ml_analysis = self.ml_analyzer.analyze(content, event, user)
+            # ═══════════════════════════════════════════════════════
+            # LAYER 1: ISOLATION FOREST
+            # ═══════════════════════════════════════════════════════
+            iso_anomaly_score = 0.0
+            iso_model_score = 0.0
             
-            # Update fragment history
+            if self.isolation_forest:
+                try:
+                    # BehavioralMLAnalyzer.predict() trả về Dict
+                    # Keys: anomaly_score, is_anomaly, features, error
+                    iso_result = self.isolation_forest.predict(event)
+                    if iso_result:
+                        iso_anomaly_score = iso_result.get('anomaly_score', 0.0)
+                        # is_anomaly là bool, convert sang score
+                        iso_model_score = 10.0 if iso_result.get('is_anomaly', False) else 0.0
+                        logger.debug(f"[Layer1] IsolationForest: anomaly={iso_anomaly_score:.2f}, is_anomaly={iso_result.get('is_anomaly')}")
+                except Exception as e:
+                    logger.warning(f"[Layer1] IsolationForest error: {e}")
+            
+            # ═══════════════════════════════════════════════════════
+            # LAYER 2: CONTENT ANALYSIS
+            # ═══════════════════════════════════════════════════════
+            ml_analysis = self.ml_analyzer.analyze(content, event, user)
             self._update_fragment_history(content, time.time(), ml_analysis)
             
-            # Compute combined score (ML + Rules)
             ml_score = ml_analysis.combined_risk_score
             rule_score = self._compute_rule_score(content)
             combined_score = self._combine_scores(ml_score, rule_score)
             
-            # Create fragment - lưu full content để phục vụ rescan sau này
+            # ═══════════════════════════════════════════════════════
+            # CREATE FRAGMENT
+            # ═══════════════════════════════════════════════════════
             fragment = ContentFragment(
                 fragment_id=self._generate_fragment_id(content),
                 user=user,
@@ -318,21 +366,25 @@ class ContentAggregationTracker:
                 event_type=event.get('event_type', 'unknown'),
                 destination=self._extract_destination(event),
                 ml_analysis=ml_analysis,
-                ml_score=ml_score,
+                ml_score=combined_score,
                 rule_score=rule_score,
                 combined_score=combined_score,
                 raw_content_hash=self._hash_content(content),
                 content_preview=content[:100],
-                raw_content=content  # Lưu full content để rescan
+                raw_content=content,
+                # Store IsolationForest scores
+                iso_anomaly_score=iso_anomaly_score,
+                iso_model_score=iso_model_score
             )
             
-            # Check for existing assembly
+            # ═══════════════════════════════════════════════════════
+            # LAYER 3 & 4: RULE-BASED + CORRELATION
+            # ═══════════════════════════════════════════════════════
             assembly = self._find_related_assembly(user, fragment)
             
             if assembly:
                 return self._update_assembly(assembly, fragment)
             else:
-                # Create new assembly
                 return self._create_assembly(fragment)
     
     def _extract_content(self, event: Dict) -> Optional[str]:
@@ -497,7 +549,19 @@ class ContentAggregationTracker:
         return False
     
     def _create_assembly(self, fragment: ContentFragment) -> Optional[AggregationAlert]:
-        """Create new assembly and check for immediate alert"""
+        """
+        Create new assembly and check for alert.
+        
+        ALERT CONDITIONS:
+        ┌─────────────────────────────────────────────────────────────────────┐
+        │ Layer 4 CORRELATION: Kết hợp IsolationForest + Rule-Based        │
+        │                                                                      │
+        │ Alert khi:                                                           │
+        │   1. IsolationForest: iso_anomaly > 5.0 + content sensitive        │
+        │   2. Rule-Based: user_risk >= 7.0 OR YARA >= 2 matches            │
+        │   3. Combination: iso_anomaly > 3.0 + rule-based detected          │
+        └─────────────────────────────────────────────────────────────────────┘
+        """
         assembly = DocumentAssembly(
             assembly_id=self._generate_assembly_id(fragment.user),
             user=fragment.user,
@@ -512,13 +576,53 @@ class ContentAggregationTracker:
         # Add to tracking
         self.user_assemblies[fragment.user].append(assembly)
         
-        # Check immediate high risk
-        if fragment.combined_score > 7.0 and fragment.ml_analysis.ml_confidence > 0.6:
+        # ═══════════════════════════════════════════════════════════════════════
+        # LAYER 4: CORRELATION - Kết hợp IsolationForest + Rule-Based
+        # ═══════════════════════════════════════════════════════════════════════
+        
+        # Get IsolationForest anomaly score
+        iso_anomaly = fragment.iso_anomaly_score
+        iso_model = fragment.iso_model_score
+        
+        # Get Rule-Based risk (YARA + NLP)
+        user_rescan = self.rescan_user_content(fragment.user)
+        user_risk = user_rescan.get('risk_score', 0.0)
+        user_yara_count = user_rescan.get('yara_match_count', 0)
+        
+        # Check if content is sensitive (from ML analysis)
+        content_sensitive = fragment.ml_analysis.is_sensitive() if fragment.ml_analysis else False
+        
+        # ALERT CONDITIONS:
+        alert_triggered = False
+        alert_reason = ""
+        alert_type = "fragmentation_detected"
+        
+        # Condition 1: IsolationForest anomaly + content sensitive
+        if iso_anomaly > 5.0 and content_sensitive:
+            alert_triggered = True
+            alert_reason = f"IsolationForest anomaly: {iso_anomaly:.1f} + content sensitive"
+            alert_type = "behavioral_anomaly"
+        
+        # Condition 2: Rule-Based high risk
+        elif user_risk >= 7.0 or user_yara_count >= 2:
+            alert_triggered = True
+            alert_reason = f"Rule-Based: risk={user_risk:.1f}, YARA={user_yara_count}"
+        
+        # Condition 3: Combination - moderate anomaly + rule-based detected
+        elif iso_anomaly > 3.0 and (user_risk >= 4.0 or user_yara_count >= 1):
+            alert_triggered = True
+            alert_reason = f"Combined: ISO={iso_anomaly:.1f}, Risk={user_risk:.1f}, YARA={user_yara_count}"
+        
+        if alert_triggered:
             return self._create_alert(
                 assembly=assembly,
-                alert_type='high_risk_content',
-                reason=f"Single high-risk fragment detected",
-                ml_explanation=fragment.ml_analysis.explanation
+                alert_type=alert_type,
+                reason=alert_reason,
+                ml_explanation=(
+                    f"IsolationForest: anomaly={iso_anomaly:.1f}, model={iso_model:.1f}. "
+                    f"Rule-Based: risk={user_risk:.1f}, YARA={user_yara_count}. "
+                    f"Document: {user_rescan.get('document_type', 'unknown')}"
+                )
             )
         
         return None
@@ -666,8 +770,9 @@ class ContentAggregationTracker:
         # NLP confidence
         ml_confidence = sum(f.ml_analysis.ml_confidence for f in assembly.fragments) / len(assembly.fragments)
         
-        # CRITICAL: Rescan combined content với NLP
-        rescan_result = self.rescan_assembled_content(assembly)
+        # CRITICAL: Rescan TẤT CẢ content của user (không chỉ current assembly)
+        # Đây là key feature để detect fragmented exfiltration
+        rescan_result = self.rescan_user_content(assembly.user, assembly.assembly_id)
         
         # Get NLP risk score
         nlp_risk = rescan_result.get('risk_score', 0.0)
@@ -704,7 +809,7 @@ class ContentAggregationTracker:
             reason=reason,
             ml_explanation=ml_explanation,
             assembly_id=assembly.assembly_id,
-            fragment_count=len(assembly.fragments),
+            fragment_count=rescan_result.get('total_fragments', len(assembly.fragments)),
             
             # NLP Analysis Results
             document_type=rescan_result.get('document_type', 'unknown'),
@@ -740,7 +845,139 @@ class ContentAggregationTracker:
         
         return alert
     
-    def rescan_assembled_content(self, assembly: DocumentAssembly) -> Dict[str, Any]:
+    def rescan_user_content(self, user: str, current_assembly_id: str = None) -> Dict[str, Any]:
+        """
+        Gom TẤT CẢ fragments gần đây của user → phân tích bằng NLP + YARA.
+        
+        KHÁC VỚI rescan_assembled_content:
+        - Scan TẤT CẢ fragments của user (không chỉ 1 assembly)
+        - Dùng cho trường hợp attacker chia nhỏ để né detection
+        
+        Returns:
+            Dict với combined content analysis
+        """
+        try:
+            # 1. Lấy tất cả fragments gần đây của user (TỪ TẤT CẢ ASSEMBLIES)
+            # ĐÂY LÀ KEY FEATURE: scan tất cả fragments để detect fragmented exfiltration
+            combined_parts = []
+            seen_content = set()  # Tránh duplicate
+            
+            for assembly in self.user_assemblies.get(user, []):
+                for frag in assembly.fragments:
+                    # Ưu tiên full content > content_preview
+                    content = None
+                    if hasattr(frag, 'raw_content') and frag.raw_content:
+                        content = frag.raw_content
+                    elif hasattr(frag, 'content_preview') and frag.content_preview:
+                        content = frag.content_preview
+                    elif hasattr(frag, 'ml_analysis') and frag.ml_analysis:
+                        content = frag.ml_analysis.content_preview
+                    
+                    if content and content not in seen_content:
+                        combined_parts.append(content)
+                        seen_content.add(content)
+            
+            combined_content = "\n---\n".join(combined_parts)
+            
+            if not combined_content.strip():
+                return {
+                    'combined_content': '',
+                    'document_type': 'unknown',
+                    'document_confidence': 0.0,
+                    'nlp_entities': {},
+                    'risk_score': 0.0,
+                    'risk_factors': [],
+                    'yara_matches': [],
+                    'is_highly_sensitive': False,
+                    'combined_content_hash': None,
+                    'total_fragments': 0
+                }
+            
+            # 2. Tính hash
+            combined_hash = hashlib.sha256(combined_content.encode('utf-8', errors='replace')).hexdigest()
+            
+            # 3. NLP Analysis
+            nlp_analysis_result = {}
+            try:
+                from ML.nlp_content_analyzer import NLPPoweredAnalyzer
+                nlp_analyzer = NLPPoweredAnalyzer()
+                nlp_analysis = nlp_analyzer.analyze(combined_content)
+                
+                nlp_analysis_result = {
+                    'document_type': nlp_analysis.document_type.value,
+                    'document_confidence': nlp_analysis.document_type_confidence,
+                    'nlp_entities': nlp_analysis.entity_summary,
+                    'risk_score': nlp_analysis.risk_score,
+                    'risk_level': nlp_analysis.risk_level.name,
+                    'risk_factors': nlp_analysis.risk_factors,
+                    'has_pii': nlp_analysis.has_pii,
+                    'has_financial': nlp_analysis.has_financial,
+                    'has_legal': nlp_analysis.has_legal,
+                }
+            except Exception as e:
+                logger.warning(f"[RescanUser] NLP failed: {e}")
+                nlp_analysis_result = {'document_type': 'unknown', 'document_confidence': 0.0}
+            
+            # 4. YARA scan
+            yara_matches = []
+            try:
+                from worker.core.fast_scan import FastScanEngine
+                fast_scan = FastScanEngine()
+                yara_result = fast_scan.scan_text_content(combined_content, panic_mode=False)
+                yara_matches = yara_result.get('yara_matches', [])
+            except Exception as e:
+                logger.warning(f"[RescanUser] YARA failed: {e}")
+            
+            # 5. Calculate risk
+            nlp_risk = nlp_analysis_result.get('risk_score', 0.0)
+            yara_count = len(yara_matches)
+            yara_boost = min(yara_count * 1.0, 3.0)
+            
+            risk_score = min(10.0, max(nlp_risk, 3.0) + yara_boost)
+            
+            nlp_entities = nlp_analysis_result.get('nlp_entities', {})
+            is_sensitive = (
+                nlp_analysis_result.get('has_pii', False) and 
+                (nlp_analysis_result.get('has_financial', False) or nlp_analysis_result.get('has_legal', False))
+            ) or yara_count >= 2
+            
+            logger.warning(
+                f"[RescanUser] User={user}: Fragments={len(combined_parts)}, "
+                f"Chars={len(combined_content)}, Risk={risk_score:.1f}, "
+                f"YARA={yara_count}, DocType={nlp_analysis_result.get('document_type', 'unknown')}"
+            )
+            
+            return {
+                'combined_content': combined_content[:5000],
+                'combined_content_length': len(combined_content),
+                'combined_content_hash': combined_hash,
+                'document_type': nlp_analysis_result.get('document_type', 'unknown'),
+                'document_confidence': nlp_analysis_result.get('document_confidence', 0.0),
+                'nlp_entities': nlp_entities,
+                'entity_count': sum(nlp_entities.values()),
+                'risk_score': risk_score,
+                'nlp_risk_score': nlp_risk,
+                'risk_factors': nlp_analysis_result.get('risk_factors', []),
+                'risk_level': nlp_analysis_result.get('risk_level', 'LOW'),
+                'has_pii': nlp_analysis_result.get('has_pii', False),
+                'has_financial': nlp_analysis_result.get('has_financial', False),
+                'has_legal': nlp_analysis_result.get('has_legal', False),
+                'is_highly_sensitive': is_sensitive,
+                'yara_matches': [{'rule': m.get('rule', 'unknown')} for m in yara_matches],
+                'yara_match_count': yara_count,
+                'total_fragments': len(combined_parts),
+                'user': user
+            }
+            
+        except Exception as e:
+            logger.error(f"[RescanUser] Error: {e}", exc_info=True)
+            return {
+                'combined_content': '',
+                'document_type': 'unknown',
+                'risk_score': 0.0,
+                'yara_matches': [],
+                'total_fragments': 0
+            }
         """
         Gom các fragments lại thành 1 text lớn → phân tích bằng NLP.
         
