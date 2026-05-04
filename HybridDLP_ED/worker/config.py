@@ -111,6 +111,10 @@ class WorkerConfig:
     ML_CONFIDENCE_THRESHOLD = 0.7
     ML_MAX_TEXT_LENGTH = 10000  # Max characters để đọc từ file
     
+    # UEBA (User Entity Behavior Analytics) Toggle - cho phép bật/tắt để demo
+    # Khi tắt: paste/upload vẫn được kiểm tra qua YARA rules và Behavioral Rules Engine
+    UEBA_ENABLED = os.getenv("UEBA_ENABLED", "1").strip().lower() in {"1", "true", "yes", "on"}
+    
     # Risk Scoring — toàn bộ điểm trên thang 0–10 (cùng ý nghĩa CVSS Base 0–10)
     RISK_SCORE_MAX = 10.0
     RISK_THRESHOLDS = {

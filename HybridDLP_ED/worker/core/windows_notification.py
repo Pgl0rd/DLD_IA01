@@ -168,46 +168,74 @@ class WindowsNotification:
         except Exception as e:
             logger.error(f"win32 messagebox error: {e}")
             return False
+    
+    def show_violation_alert(self,
+                            violation_type: str,
+                            details: Optional[Dict[str, Any]] = None,
+                            event_id: Optional[str] = None,
+                            alert_reason: Optional[str] = None) -> bool:
+        """
+        Hiển thị thông báo vi phạm chuẩn
 
-    def _show_customtkinter_message(
-        self,
-        title: str,
-        message: str,
-        severity: str,
-        duration: int,
-    ) -> bool:
-        fields = {"message": message}
-        return self._show_customtkinter_violation(
-            title=title,
-            violation_type=severity.title(),
-            details=fields,
-            duration=duration,
-        )
+        Args:
+            violation_type: Loại vi phạm (ví dụ: "Sensitive Data", "Clipboard Paste")
+            details: Chi tiết vi phạm
+            event_id: ID của event (để trace)
+            alert_reason: Nguyên nhân alert cụ thể
 
-    def show_violation_alert(
-        self,
-        violation_type: str,
-        details: Optional[Dict[str, Any]] = None,
-    ) -> bool:
-        """Show a policy-violation alert with a DLP-specific modern layout."""
-        title = "HybridDLP - Cảnh báo vi phạm"
-        details = details or {}
+        Returns:
+            True nếu thành công
+        """
+        # Build message
+        title = "HybridDLP - Canh Bao Vi Pham Bao Mat"
 
-        if self.method == "customtkinter":
-            ok = self._show_customtkinter_violation(
-                title=title,
-                violation_type=violation_type,
-                details=details,
-                duration=15,
-            )
-            if ok:
-                return True
+        message_parts = [
+            "CANH BAO: Ban da thuc hien hanh dong vi pham chinh sach!",
+            "",
+        ]
 
+        # Neu co event_id, hien thi
+        if event_id and event_id != 'unknown':
+            message_parts.append(f"Event ID: {event_id}")
+
+        message_parts.append(f"Loai vi pham: {violation_type}")
+
+        if details:
+            if details.get('window_title'):
+                message_parts.append(f"Ung dung: {details['window_title']}")
+            if details.get('yara_matches'):
+                matches = details['yara_matches']
+                if matches:
+                    rules = [m.get('rule', '') for m in matches[:3] if m.get('rule')]
+                    if rules:
+                        message_parts.append(f"Phat hien: {', '.join(rules)}")
+            if details.get('risk_score'):
+                message_parts.append(f"Do nguy hiem: {details['risk_score']:.1f}/10")
+
+        # Hien thi alert reason (nguyen nhan cu the)
+        if alert_reason and alert_reason not in ('Unknown', ''):
+            message_parts.append("")
+            message_parts.append("Nguyen nhan:")
+            # Format alert_reason de hien thi dep hon
+            reasons = alert_reason.split('; ')
+            for reason in reasons:
+                if reason:
+                    message_parts.append(f"  - {reason}")
+
+        message_parts.extend([
+            "",
+            "Hanh dong cua ban da duoc ghi lai.",
+            "Vui long tuan thu chinh sach bao mat cong ty."
+        ])
+
+        message = "\n".join(message_parts)
+
+        # Show notification
         return self.show_alert(
             title=title,
             message=self._build_violation_message(violation_type, details),
             severity="warning",
-            duration=15,
+            duration=15  # Hien thi 15 giay
         )
 
     def _build_violation_message(self, violation_type: str, details: Dict[str, Any]) -> str:

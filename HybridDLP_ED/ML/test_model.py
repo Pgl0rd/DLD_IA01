@@ -5,10 +5,11 @@ import json
 import numpy as np
 from pathlib import Path
 import logging
+import os
 from datetime import datetime, timezone
 
 # Setup logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.DEBUG if os.getenv("DEBUG_ML", "1").strip().lower() in {"1", "true", "yes", "on", "debug"} else logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Import ML modules
@@ -200,9 +201,21 @@ def test_model():
         is_anomaly = result.get('is_anomaly', False)
         raw_score = result.get('raw_score', 0.0)
         
-        logger.info(f"  Anomaly Score: {anomaly_score:.2f}/100")
+        # Detailed output
+        logger.info(f"  === UEBA Score Breakdown ===")
+        logger.info(f"  Anomaly Score: {anomaly_score:.2f}/10")
         logger.info(f"  Is Anomaly: {is_anomaly}")
         logger.info(f"  Raw Score: {raw_score:.4f}")
+        logger.info(f"")
+        logger.info(f"  --- Score Components ---")
+        logger.info(f"  Model Score:     {result.get('model_score', 0):.3f} (IsolationForest)")
+        logger.info(f"  Profile Score:  {result.get('profile_score', 0):.3f} (User behavior deviation)")
+        logger.info(f"  Baseline Score: {result.get('baseline_score', 0):.3f} (vs user baseline)")
+        logger.info(f"  Slow Burn:      {result.get('slow_burn_score', 0):.3f} (Low-and-slow accumulator)")
+        logger.info(f"")
+        logger.info(f"  Profile Reasons: {result.get('profile_reasons', [])}")
+        logger.info(f"  Baseline Reasons: {result.get('baseline_reasons', [])}")
+        logger.info(f"  Baseline N events: {result.get('baseline_n', 0)}")
         
         # Interpret result
         if is_anomaly:
@@ -214,7 +227,11 @@ def test_model():
             'scenario': scenario_name,
             'anomaly_score': anomaly_score,
             'is_anomaly': is_anomaly,
-            'raw_score': raw_score
+            'raw_score': raw_score,
+            'model_score': result.get('model_score', 0),
+            'profile_score': result.get('profile_score', 0),
+            'baseline_score': result.get('baseline_score', 0),
+            'slow_burn': result.get('slow_burn_score', 0),
         })
         
         logger.info("")
@@ -227,6 +244,7 @@ def test_model():
     for result in results:
         status = "[WARN]  ANOMALY" if result['is_anomaly'] else "[OK] NORMAL"
         logger.info(f"{result['scenario']}: {status} (Score: {result['anomaly_score']:.2f})")
+        logger.info(f"  - Model: {result['model_score']:.2f}, Profile: {result['profile_score']:.2f}, Baseline: {result['baseline_score']:.2f}, SlowBurn: {result['slow_burn']:.2f}")
     
     logger.info("")
     
@@ -247,7 +265,7 @@ def test_model():
         from worker.config import WorkerConfig
         threshold = WorkerConfig.ML_ANOMALY_THRESHOLD
     except:
-        threshold = 75.0
+        threshold = 7.0
     
     logger.info(f"Current Threshold: {threshold:.1f}")
     logger.info("")

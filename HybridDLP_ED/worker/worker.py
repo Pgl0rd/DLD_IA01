@@ -43,6 +43,8 @@ ML_DIR = Path(__file__).parent.parent / "ML"
 if ML_DIR.exists():
     sys.path.insert(0, str(ML_DIR.parent))
     from ML.behavioral_ml_analyzer import BehavioralMLAnalyzer
+    from ML.content_aggregation_tracker import ContentAggregationTracker, AggregationAlert
+    from ML.content_fingerprint import ContentFingerprint
 else:
     # Fallback to old location
     from ml_pipeline.behavioral_ml_analyzer import BehavioralMLAnalyzer
@@ -117,6 +119,8 @@ class DetectionEngine:
         self.behavioral_rules = BehavioralRulesEngine()  # Behavioral rules engine
         # Lazy UEBA — không load model trong __init__ (Noteupdate: lazy ML)
         self._ml_analyzer = None
+        # Content Aggregation Tracker — phát hiện fragmented exfiltration
+        self._aggregation_tracker = None
         self._correlator, self._pqueue = _make_correlator_and_pqueue()
         self.processed_events_db = ProcessedEventsDB(WorkerConfig.WORKER_DIR / "database")
         # Chống alert trùng cùng SHA-256 trong cửa sổ thời gian (Noteupdate §19)
@@ -146,6 +150,13 @@ class DetectionEngine:
         if self._ml_analyzer is None:
             self._ml_analyzer = BehavioralMLAnalyzer()
         return self._ml_analyzer
+
+    @property
+    def aggregation_tracker(self):
+        """Lazy-load content aggregation tracker"""
+        if self._aggregation_tracker is None:
+            self._aggregation_tracker = ContentAggregationTracker()
+        return self._aggregation_tracker
 
     def _save_processed_event(self, event: dict, risk_result: dict, fast_scan_result: dict, behavioral_matches: list):
         try:
@@ -586,6 +597,12 @@ class DetectionEngine:
                 logger.debug(f"[PID={pid}] Skipping heartbeat event after normalization: event_id={event_id}")
                 return True
             
+            # ==== Skip proc_start và proc_end Events ====
+            # Các event này không cần xử lý trong worker (chỉ là thông tin tiến trình)
+            if event_type in ('proc_start', 'proc_end'):
+                logger.debug(f"[PID={pid}] Skipping {event_type} event: event_id={event_id}")
+                return True
+            
             # ==== Xử lý Screenshot Events ====
             # Phải kiểm tra TRƯỚC clipboard để screenshot không bị thuợc vào clipboard branch
             is_screenshot_event = event_type.lower() == "screenshot"
@@ -859,13 +876,32 @@ class DetectionEngine:
                         f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
                     )
             
-            # 5.6. UEBA ML Anomaly Detection
+            # 5.5b. Chuẩn bị variables cho aggregation và ML
+            ctx = event.get('context', {}) or {}
+            user = ctx.get('user') or event.get('user', 'unknown')
+            
+            # 5.6. UEBA ML Anomaly Detection (toggle via UEBA_ENABLED in config)
             ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
-            if self.ml_analyzer.is_available():
+            _debug_ml = os.getenv("DEBUG_ML", "0").strip().lower() in {"1", "true", "yes", "on", "debug"}
+            if WorkerConfig.UEBA_ENABLED and self.ml_analyzer.is_available():
                 try:
                     # Use recent event history for frequency features
                     recent_history = self.event_history[-100:] if len(self.event_history) > 100 else self.event_history
                     ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
+                    
+                    # Debug: log full ML breakdown for every event
+                    if _debug_ml:
+                        logger.debug(
+                            f"[UEBA DEBUG] User={user}, Type={event_type}, "
+                            f"ML_score={ml_anomaly_result.get('anomaly_score', 0):.3f}, "
+                            f"is_anomaly={ml_anomaly_result.get('is_anomaly', False)}, "
+                            f"model={ml_anomaly_result.get('model_score', 0):.3f}, "
+                            f"profile={ml_anomaly_result.get('profile_score', 0):.3f}, "
+                            f"baseline={ml_anomaly_result.get('baseline_score', 0):.3f}, "
+                            f"slow_burn={ml_anomaly_result.get('slow_burn_score', 0):.3f}, "
+                            f"profile_reasons={ml_anomaly_result.get('profile_reasons', [])}, "
+                            f"baseline_reasons={ml_anomaly_result.get('baseline_reasons', [])}"
+                        )
                     
                     if ml_anomaly_result.get('is_anomaly', False):
                         anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
@@ -891,10 +927,37 @@ class DetectionEngine:
             except Exception:
                 pass
             
+            # 5b. Content Aggregation Detection (Fragmented Exfiltration)
+            # Phát hiện khi user thu thập từng mảnh thông tin nhạy cảm
+            # CRITICAL: Nếu có fragmentation, hệ thống sẽ gom fragments → scan YARA/NLP
+            _debug_aggregation = os.getenv("DEBUG_AGGREGATION", "0").strip().lower() in {"1", "true", "yes"}
+            if WorkerConfig.UEBA_ENABLED:
+                try:
+                    aggregation_alert = self.aggregation_tracker.process_event(event, user)
+                    if aggregation_alert:
+                        agg_risk = aggregation_alert.risk_score
+                        deep_analysis_result['aggregation_risk_score'] = agg_risk
+                        deep_analysis_result['aggregation_alert'] = True
+                        deep_analysis_result['aggregation_type'] = aggregation_alert.alert_type
+                        
+                        # NEW: Include combined content analysis results
+                        deep_analysis_result['aggregation_yara_matches'] = aggregation_alert.yara_matches
+                        deep_analysis_result['aggregation_nlp_entities'] = aggregation_alert.nlp_entities
+                        deep_analysis_result['aggregation_is_sensitive'] = aggregation_alert.is_highly_sensitive
+                        deep_analysis_result['aggregation_content_preview'] = aggregation_alert.combined_content_preview
+                        
+                        if _debug_aggregation or agg_risk >= 5.0:
+                            logger.warning(
+                                f"[AGGREGATION ALERT] User={user}, Type={aggregation_alert.alert_type}, "
+                                f"Risk={agg_risk:.1f}, YARA={len(aggregation_alert.yara_matches)}, "
+                                f"NLP_entities={sum(aggregation_alert.nlp_entities.values()) if aggregation_alert.nlp_entities else 0}, "
+                                f"Reason={aggregation_alert.reason}"
+                            )
+                except Exception as agg_err:
+                    logger.error(f"Error in content aggregation detection: {agg_err}")
+            
             # 6. Risk Scoring
             # Chuẩn hoá context cho RiskScoringEngine
-            # Lấy context từ event
-            ctx = event.get('context', {}) or {}
             
             # action_type: ưu tiên event_type từ agent, fallback type
             action_type = operation.get('op_type') or event.get('event_type') or event.get('type', 'file_copy')
@@ -913,9 +976,6 @@ class DetectionEngine:
                     or obj.get('drive')
                     or ''
                 )
-            
-            # user: từ context
-            user = ctx.get('user') or event.get('user', 'unknown')
             
             # Detect exfiltration from sensitive folders (config-based)
             obj = event.get('object', {}) or {}
@@ -964,6 +1024,9 @@ class DetectionEngine:
                 # UEBA ML anomaly detection
                 'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
                 'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
+                # Content aggregation (fragmented exfil)
+                'aggregation_risk_score': deep_analysis_result.get('aggregation_risk_score', 0.0),
+                'aggregation_alert': deep_analysis_result.get('aggregation_alert', False),
                 # Hard policy: any exfil from sensitive folders must be max score + alert (trừ file trong whitelist tên low/medium)
                 'force_max_risk': force_max,
                 'force_max_risk_reason': (
@@ -991,6 +1054,17 @@ class DetectionEngine:
                     logger.warning(f"Overriding calculated risk score with cached malicious score: {cached_malicious_score}")
                     if risk_result['total_score'] >= WorkerConfig.RISK_THRESHOLDS['alert']:
                         risk_result['action'] = 'alert'
+
+            # Apply aggregation risk boost (content aggregation / fragmented exfil)
+            agg_risk = deep_analysis_result.get('aggregation_risk_score', 0.0)
+            if agg_risk > 0:
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + agg_risk)
+                if "cvss_score" in risk_result:
+                    risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
+                risk_result['details']['aggregation'] = {
+                    'risk_score': agg_risk,
+                    'alert_type': deep_analysis_result.get('aggregation_type', 'unknown'),
+                }
 
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0 and fn_band != "low_medium":
@@ -1371,12 +1445,27 @@ class DetectionEngine:
                         f"- {highest.get('reason', '')} (+{behavioral_risk_boost})"
                     )
 
-            # ---- 5. ML / UEBA ----
+            # ---- 5. ML / UEBA (toggle via UEBA_ENABLED in config) ----
             ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
-            if self.ml_analyzer.is_available():
+            _debug_ml = os.getenv("DEBUG_ML", "0").strip().lower() in {"1", "true", "yes", "on", "debug"}
+            if WorkerConfig.UEBA_ENABLED and self.ml_analyzer.is_available():
                 try:
                     recent = self.event_history[-100:] if len(self.event_history) > 100 else self.event_history
                     ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent)
+                    
+                    # Debug: log full ML breakdown
+                    if _debug_ml:
+                        logger.debug(
+                            f"[UEBA DEBUG BrowserUpload] User={ctx.get('user', 'unknown')}, "
+                            f"ML_score={ml_anomaly_result.get('anomaly_score', 0):.3f}, "
+                            f"is_anomaly={ml_anomaly_result.get('is_anomaly', False)}, "
+                            f"model={ml_anomaly_result.get('model_score', 0):.3f}, "
+                            f"profile={ml_anomaly_result.get('profile_score', 0):.3f}, "
+                            f"baseline={ml_anomaly_result.get('baseline_score', 0):.3f}, "
+                            f"slow_burn={ml_anomaly_result.get('slow_burn_score', 0):.3f}, "
+                            f"reasons={ml_anomaly_result.get('profile_reasons', []) + ml_anomaly_result.get('baseline_reasons', [])}"
+                        )
+                    
                     if ml_anomaly_result.get('is_anomaly', False):
                         logger.warning(
                             f"[PID={pid}] UEBA Anomaly (BrowserUpload): "
@@ -1391,6 +1480,31 @@ class DetectionEngine:
                 deep_analysis_result['anomaly_score']    = max(-1.0, min(1.0, (_ml_s / 5.0) - 1.0))
             except Exception:
                 pass
+
+            # ---- 5b. Content Aggregation Detection (Fragmented Exfiltration) ----
+            # CRITICAL: Gom fragments → scan YARA/NLP để cover "chia nhỏ dữ liệu"
+            _debug_aggregation = os.getenv("DEBUG_AGGREGATION", "0").strip().lower() in {"1", "true", "yes"}
+            user = ctx.get('user') or event.get('actor', {}).get('user', 'unknown')
+            if WorkerConfig.UEBA_ENABLED:
+                try:
+                    aggregation_alert = self.aggregation_tracker.process_event(event, user)
+                    if aggregation_alert:
+                        agg_risk = aggregation_alert.risk_score
+                        deep_analysis_result['aggregation_risk_score'] = agg_risk
+                        deep_analysis_result['aggregation_alert'] = True
+                        deep_analysis_result['aggregation_type'] = aggregation_alert.alert_type
+                        # NEW: Include combined content analysis
+                        deep_analysis_result['aggregation_yara_matches'] = aggregation_alert.yara_matches
+                        deep_analysis_result['aggregation_nlp_entities'] = aggregation_alert.nlp_entities
+                        deep_analysis_result['aggregation_is_sensitive'] = aggregation_alert.is_highly_sensitive
+                        if _debug_aggregation or agg_risk >= 5.0:
+                            logger.warning(
+                                f"[AGGREGATION ALERT] User={user}, Type={aggregation_alert.alert_type}, "
+                                f"Risk={agg_risk:.1f}, YARA={len(aggregation_alert.yara_matches)}, "
+                                f"NLP={sum(aggregation_alert.nlp_entities.values()) if aggregation_alert.nlp_entities else 0}"
+                            )
+                except Exception as agg_err:
+                    logger.error(f"[PID={pid}] Aggregation error: {agg_err}")
 
             # ---- 6. Risk Scoring ----
             # Nhận diện sensitive domain để tăng risk tương tự _is_sensitive_external_destination
@@ -1421,12 +1535,24 @@ class DetectionEngine:
                 'behavioral_details':         behavioral_details,
                 'ml_anomaly_score':           ml_anomaly_result.get('anomaly_score', 0.0),
                 'ml_is_anomaly':              ml_anomaly_result.get('is_anomaly', False),
+                # Content aggregation (fragmented exfil)
+                'aggregation_risk_score':     deep_analysis_result.get('aggregation_risk_score', 0.0),
+                'aggregation_alert':          deep_analysis_result.get('aggregation_alert', False),
                 '_event_data':                event,
             }
 
             risk_result = self.risk_scoring.calculate_score(
                 fast_scan_result, deep_analysis_result, event_context
             )
+            
+            # Apply aggregation risk boost
+            agg_risk = deep_analysis_result.get('aggregation_risk_score', 0.0)
+            if agg_risk > 0:
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + agg_risk)
+                risk_result['details']['aggregation'] = {
+                    'risk_score': agg_risk,
+                    'alert_type': deep_analysis_result.get('aggregation_type', 'unknown'),
+                }
 
             # Apply cached malicious score if it was previously detected as malicious
             if cached_malicious_score is not None:
@@ -1558,6 +1684,9 @@ class DetectionEngine:
         try:
             # Log event structure for debugging
             logger.debug(f"Clipboard event structure: type={event.get('type')}, source={event.get('source')}, has_clipboard={bool(event.get('clipboard'))}, has_content={bool(event.get('content'))}")
+            
+            # Lay ctx som de dung cho debug logging
+            ctx = event.get('context', {}) or {}
             
             content = event.get('content', {}) or {}
             clipboard = event.get('clipboard', {}) or {}
@@ -1760,12 +1889,27 @@ class DetectionEngine:
                         f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
                     )
             
-            # 3.6. UEBA ML Anomaly Detection cho clipboard (context-based & transformation cases)
+            # 3.6. UEBA ML Anomaly Detection cho clipboard (toggle via UEBA_ENABLED in config)
             ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
-            if self.ml_analyzer.is_available():
+            _debug_ml = os.getenv("DEBUG_ML", "0").strip().lower() in {"1", "true", "yes", "on", "debug"}
+            if WorkerConfig.UEBA_ENABLED and self.ml_analyzer.is_available():
                 try:
                     recent_history = self.event_history[-150:] if len(self.event_history) > 150 else self.event_history
                     ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
+                    
+                    # Debug: log full ML breakdown
+                    if _debug_ml:
+                        logger.debug(
+                            f"[UEBA DEBUG Clipboard] User={ctx.get('user', 'unknown')}, "
+                            f"ML_score={ml_anomaly_result.get('anomaly_score', 0):.3f}, "
+                            f"is_anomaly={ml_anomaly_result.get('is_anomaly', False)}, "
+                            f"model={ml_anomaly_result.get('model_score', 0):.3f}, "
+                            f"profile={ml_anomaly_result.get('profile_score', 0):.3f}, "
+                            f"baseline={ml_anomaly_result.get('baseline_score', 0):.3f}, "
+                            f"slow_burn={ml_anomaly_result.get('slow_burn_score', 0):.3f}, "
+                            f"reasons={ml_anomaly_result.get('profile_reasons', []) + ml_anomaly_result.get('baseline_reasons', [])}"
+                        )
+                    
                     if ml_anomaly_result.get('is_anomaly', False):
                         anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
                         reasons = (
@@ -1786,9 +1930,38 @@ class DetectionEngine:
             except Exception:
                 pass
 
+            # 3.7. Content Aggregation Detection (Fragmented Exfiltration)
+            # Phát hiện khi user thu thập từng mảnh thông tin nhạy cảm
+            _debug_aggregation = os.getenv("DEBUG_AGGREGATION", "0").strip().lower() in {"1", "true", "yes"}
+            aggregation_alert = None
+            user = ctx.get('user') or event.get('actor', {}).get('user', 'unknown')
+            
+            if WorkerConfig.UEBA_ENABLED:
+                try:
+                    aggregation_alert = self.aggregation_tracker.process_event(event, user)
+                    
+                    if aggregation_alert:
+                        agg_risk = aggregation_alert.risk_score
+                        deep_analysis_result['aggregation_risk_score'] = agg_risk
+                        deep_analysis_result['aggregation_alert'] = True
+                        deep_analysis_result['aggregation_type'] = aggregation_alert.alert_type
+                        # NEW: Combined content analysis results
+                        deep_analysis_result['aggregation_yara_matches'] = aggregation_alert.yara_matches
+                        deep_analysis_result['aggregation_nlp_entities'] = aggregation_alert.nlp_entities
+                        deep_analysis_result['aggregation_is_sensitive'] = aggregation_alert.is_highly_sensitive
+                        deep_analysis_result['aggregation_content_preview'] = aggregation_alert.combined_content_preview
+                        
+                        if _debug_aggregation or agg_risk >= 5.0:
+                            logger.warning(
+                                f"[AGGREGATION ALERT] User={user}, Type={aggregation_alert.alert_type}, "
+                                f"Risk={agg_risk:.1f}, YARA={len(aggregation_alert.yara_matches)}, "
+                                f"NLP={sum(aggregation_alert.nlp_entities.values()) if aggregation_alert.nlp_entities else 0}"
+                            )
+                except Exception as agg_err:
+                    logger.error(f"Error in content aggregation detection: {agg_err}")
+            
             # 4. Risk Scoring với context đặc biệt cho clipboard
-            # BUG FIX: Không redeclare raw_clipboard (đã khai báo ở line ~1265) để tránh variable shadowing
-            ctx = event.get('context', {}) or {}
+            # Note: ctx đã được khai báo ở đầu hàm
             raw_ctx = raw_original.get('context', {}) or {}
             operation = event.get('operation', {}) or {}
             
@@ -1839,6 +2012,9 @@ class DetectionEngine:
                 'behavioral_details': behavioral_details,
                 'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
                 'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
+                # Content aggregation (fragmented exfil) context
+                'aggregation_risk_score': deep_analysis_result.get('aggregation_risk_score', 0.0),
+                'aggregation_alert': deep_analysis_result.get('aggregation_alert', False),
                 # Event data for risk scoring (IOC hits, etc.)
                 '_event_data': event
             }
@@ -1848,6 +2024,17 @@ class DetectionEngine:
                 deep_analysis_result,
                 event_context
             )
+            
+            # Apply aggregation risk boost (content aggregation / fragmented exfil)
+            agg_risk = deep_analysis_result.get('aggregation_risk_score', 0.0)
+            if agg_risk > 0:
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + agg_risk)
+                if "cvss_score" in risk_result:
+                    risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
+                risk_result['details']['aggregation'] = {
+                    'risk_score': agg_risk,
+                    'alert_type': deep_analysis_result.get('aggregation_type', 'unknown'),
+                }
             
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:
@@ -2175,12 +2362,26 @@ class DetectionEngine:
                         f"{highest_match.get('reason', '')} (+{behavioral_risk_boost} risk boost)"
                     )
             
-            # 1.5. UEBA ML Anomaly Detection
+            # 1.5. UEBA ML Anomaly Detection (toggle via UEBA_ENABLED in config)
             ml_anomaly_result = {'anomaly_score': 0.0, 'is_anomaly': False}
-            if self.ml_analyzer.is_available():
+            _debug_ml = os.getenv("DEBUG_ML", "0").strip().lower() in {"1", "true", "yes", "on", "debug"}
+            if WorkerConfig.UEBA_ENABLED and self.ml_analyzer.is_available():
                 try:
                     recent_history = self.event_history[-100:] if len(self.event_history) > 100 else self.event_history
                     ml_anomaly_result = self.ml_analyzer.predict(event, event_history=recent_history)
+                    
+                    # Debug: log full ML breakdown
+                    if _debug_ml:
+                        logger.debug(
+                            f"[UEBA DEBUG SpecialEvent] User={ctx.get('user', 'unknown')}, "
+                            f"ML_score={ml_anomaly_result.get('anomaly_score', 0):.3f}, "
+                            f"is_anomaly={ml_anomaly_result.get('is_anomaly', False)}, "
+                            f"model={ml_anomaly_result.get('model_score', 0):.3f}, "
+                            f"profile={ml_anomaly_result.get('profile_score', 0):.3f}, "
+                            f"baseline={ml_anomaly_result.get('baseline_score', 0):.3f}, "
+                            f"slow_burn={ml_anomaly_result.get('slow_burn_score', 0):.3f}, "
+                            f"reasons={ml_anomaly_result.get('profile_reasons', []) + ml_anomaly_result.get('baseline_reasons', [])}"
+                        )
                     
                     if ml_anomaly_result.get('is_anomaly', False):
                         anomaly_score = ml_anomaly_result.get('anomaly_score', 0.0)
@@ -2196,6 +2397,32 @@ class DetectionEngine:
                 deep_analysis_result['anomaly_score'] = max(-1.0, min(1.0, (ml_score_0_10 / 5.0) - 1.0))
             except Exception:
                 pass
+            
+            # 1.6. Content Aggregation Detection (Fragmented Exfiltration)
+            # CRITICAL: Gom fragments → scan YARA/NLP để cover "chia nhỏ dữ liệu"
+            _debug_aggregation = os.getenv("DEBUG_AGGREGATION", "0").strip().lower() in {"1", "true", "yes"}
+            ctx = event.get('context', {}) or {}
+            user = ctx.get('user') or event.get('actor', {}).get('user', 'unknown')
+            if WorkerConfig.UEBA_ENABLED:
+                try:
+                    aggregation_alert = self.aggregation_tracker.process_event(event, user)
+                    if aggregation_alert:
+                        agg_risk = aggregation_alert.risk_score
+                        deep_analysis_result['aggregation_risk_score'] = agg_risk
+                        deep_analysis_result['aggregation_alert'] = True
+                        deep_analysis_result['aggregation_type'] = aggregation_alert.alert_type
+                        # NEW: Combined content analysis
+                        deep_analysis_result['aggregation_yara_matches'] = aggregation_alert.yara_matches
+                        deep_analysis_result['aggregation_nlp_entities'] = aggregation_alert.nlp_entities
+                        deep_analysis_result['aggregation_is_sensitive'] = aggregation_alert.is_highly_sensitive
+                        if _debug_aggregation or agg_risk >= 5.0:
+                            logger.warning(
+                                f"[AGGREGATION ALERT] User={user}, Type={aggregation_alert.alert_type}, "
+                                f"Risk={agg_risk:.1f}, YARA={len(aggregation_alert.yara_matches)}, "
+                                f"NLP={sum(aggregation_alert.nlp_entities.values()) if aggregation_alert.nlp_entities else 0}"
+                            )
+                except Exception as agg_err:
+                    logger.error(f"Error in content aggregation detection: {agg_err}")
             
             # 2. Risk Scoring
             ctx = event.get('context', {}) or {}
@@ -2218,6 +2445,9 @@ class DetectionEngine:
                 'behavioral_details': behavioral_details,
                 'ml_anomaly_score': ml_anomaly_result.get('anomaly_score', 0.0),
                 'ml_is_anomaly': ml_anomaly_result.get('is_anomaly', False),
+                # Content aggregation (fragmented exfil)
+                'aggregation_risk_score': deep_analysis_result.get('aggregation_risk_score', 0.0),
+                'aggregation_alert': deep_analysis_result.get('aggregation_alert', False),
                 '_event_data': event
             }
             
@@ -2226,6 +2456,17 @@ class DetectionEngine:
                 deep_analysis_result,
                 event_context
             )
+            
+            # Apply aggregation risk boost
+            agg_risk = deep_analysis_result.get('aggregation_risk_score', 0.0)
+            if agg_risk > 0:
+                risk_result['total_score'] = min(10.0, risk_result['total_score'] + agg_risk)
+                if "cvss_score" in risk_result:
+                    risk_result["cvss_score"] = round(min(10.0, risk_result["total_score"]), 2)
+                risk_result['details']['aggregation'] = {
+                    'risk_score': agg_risk,
+                    'alert_type': deep_analysis_result.get('aggregation_type', 'unknown'),
+                }
             
             # Apply behavioral risk boost
             if behavioral_risk_boost > 0:

@@ -252,11 +252,17 @@ class ActionExecutor:
         """Block hành động (xóa file, kill process, etc.)"""
         file_name = file_path.name if hasattr(file_path, 'name') and str(file_path) != 'clipboard://clipboard_content' else str(file_path)
         event_id = context.get('event_id', 'unknown')
+        action_type = context.get('action_type', 'unknown')
         pid = os.getpid()
+        
+        # Xác định chi tiết block (nguyên nhân cụ thể)
+        block_reason = self._get_alert_reason(details, context, report)
         
         logger.warning(
             f"[PID={pid}] BLOCK triggered: "
-            f"event_id={event_id}, file={file_name}, score={risk_score:.1f}"
+            f"event_id={event_id}, action={action_type}, "
+            f"file={file_name}, score={risk_score:.1f}, "
+            f"reason={block_reason}"
         )
         
         # Hiển thị thông báo block
@@ -279,8 +285,10 @@ class ActionExecutor:
                 file_path, risk_score, violation_type, details, context, report
             )
             self.notification.show_violation_alert(
-                violation_type=f"Bị chặn: {violation_type}",
-                details=notification_details
+                violation_type=f"BI CHAN: {violation_type}",
+                details=notification_details,
+                event_id=event_id,
+                alert_reason=block_reason
             )
         except Exception as e:
             logger.error(f"Error showing block notification: {e}")
@@ -317,11 +325,17 @@ class ActionExecutor:
         """Gửi cảnh báo và hiển thị thông báo trên Windows"""
         file_name = file_path.name if hasattr(file_path, 'name') and str(file_path) != 'clipboard://clipboard_content' else str(file_path)
         event_id = context.get('event_id', 'unknown')
+        action_type = context.get('action_type', 'unknown')
         pid = os.getpid()
+        
+        # Xác định chi tiết alert (nguyên nhân cụ thể)
+        alert_reason = self._get_alert_reason(details, context, report)
         
         logger.warning(
             f"[PID={pid}] ALERT triggered: "
-            f"event_id={event_id}, file={file_name}, score={risk_score:.1f}"
+            f"event_id={event_id}, action={action_type}, "
+            f"file={file_name}, score={risk_score:.1f}, "
+            f"reason={alert_reason}"
         )
         
         try:
@@ -351,7 +365,9 @@ class ActionExecutor:
             if float(risk_score) >= self.windows_alert_min_score:
                 self.notification.show_violation_alert(
                     violation_type=violation_type,
-                    details=notification_details
+                    details=notification_details,
+                    event_id=event_id,
+                    alert_reason=alert_reason
                 )
             else:
                 logger.info(
@@ -369,6 +385,61 @@ class ActionExecutor:
         except Exception as e:
             logger.error(f"Alert action error: {e}")
             return False
+    
+    def _get_alert_reason(self, details: Dict[str, Any],
+                          context: Dict[str, Any],
+                          report: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Xác định nguyên nhân alert cụ thể
+        Returns: Chi tiết về alert (file nào, rule nào, nguyên nhân gì)
+        """
+        reasons = []
+        
+        # 1. YARA matches - nội dung nhạy cảm
+        yara_matches = (
+            details.get('content', {}).get('yara_matches', []) or
+            details.get('yara_matches', []) or
+            []
+        )
+        if yara_matches:
+            rules = [m.get('rule', '') for m in yara_matches if m.get('rule')]
+            if rules:
+                reasons.append(f"YARA:[{', '.join(rules)}]")
+        
+        # 2. Behavioral rule matched
+        behavioral = details.get('behavioral', {})
+        if behavioral.get('behavioral_rule_matched'):
+            reasons.append(f"Behavioral:[{behavioral['behavioral_rule_matched']}]")
+        
+        # 3. Content aggregation (fragmented exfil)
+        if details.get('aggregation', {}).get('alert_type'):
+            agg_type = details['aggregation']['alert_type']
+            agg_score = details['aggregation'].get('risk_score', 0)
+            reasons.append(f"Aggregation:[{agg_type}@{agg_score:.1f}]")
+        
+        # 4. Filename policy
+        fn_policy = details.get('filename_policy', {})
+        if fn_policy.get('policy'):
+            reasons.append(f"Policy:[{fn_policy['policy']}]")
+        
+        # 5. Cached malicious score
+        if details.get('cache_override'):
+            reasons.append("Cached:[malicious]")
+        
+        # 6. Sensitive folder exfiltration
+        if context.get('force_max_risk_reason'):
+            reasons.append(f"Exfil:[{context.get('force_max_risk_reason', '')}]")
+        
+        # 7. ML anomaly detected
+        if context.get('ml_is_anomaly'):
+            ml_score = context.get('ml_anomaly_score', 0)
+            reasons.append(f"ML_Anomaly:[score={ml_score:.2f}]")
+        
+        # 8. File sensitivity
+        if report and report.get('File_Sensitivity') not in ('Unknown', None, ''):
+            reasons.append(f"Sensitivity:[{report.get('File_Sensitivity')}]")
+        
+        return "; ".join(reasons) if reasons else "Unknown"
     
     def _determine_violation_type(self, 
                                   details: Dict[str, Any],
@@ -588,9 +659,11 @@ class ActionExecutor:
                 timestamp = datetime.now(timezone.utc).isoformat()
             
             # Build alert entry
+            event_id = context.get('event_id', 'unknown')
             alert_entry = {
                 'type': 'alert',
                 'source': 'worker',
+                'event_id': event_id,
                 'severity': 'high' if risk_score >= 7 else 'medium' if risk_score >= 4 else 'low',
                 'timestamp': timestamp,
                 'ts': datetime.fromisoformat(timestamp.replace('Z', '+00:00')).timestamp() if 'T' in timestamp else time.time(),
@@ -603,7 +676,10 @@ class ActionExecutor:
                 'process_name': context.get('process_name') or '',
                 'user': context.get('user') or 'unknown',
                 'source': context.get('source') or 'unknown',
-                'is_clipboard': str(file_path) == 'clipboard://clipboard_content' if file_path else False
+                'is_clipboard': str(file_path) == 'clipboard://clipboard_content' if file_path else False,
+                # Alert details - chi tiết về alert
+                'alert_reason': self._get_alert_reason(details, context, report),
+                'action_type': context.get('action_type', 'unknown'),
             }
             
             # Load existing alerts
@@ -637,7 +713,8 @@ class ActionExecutor:
             pid = os.getpid()
             logger.info(
                 f"[PID={pid}] Saved alert to dashboard: "
-                f"action={action}, score={risk_score}, "
+                f"event_id={event_id}, action={action}, score={risk_score}, "
+                f"reason={alert_entry.get('alert_reason', 'unknown')}, "
                 f"keywords={keywords}, path={self.dashboard_log_path}, "
                 f"total_alerts={len(alerts)}"
             )

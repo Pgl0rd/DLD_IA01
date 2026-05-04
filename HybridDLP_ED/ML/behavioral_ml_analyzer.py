@@ -26,6 +26,13 @@ def _clamp_0_10(v: float) -> float:
     return max(0.0, min(10.0, float(v)))
 
 
+# Debug logging control
+_DEBUG_ML = os.getenv("DEBUG_ML", "0").strip().lower() in {"1", "true", "yes", "on", "debug"}
+def _ml_debug(*args, **kwargs):
+    if _DEBUG_ML:
+        logger.debug(*args, **kwargs)
+
+
 def _normalize_anomaly_raw(raw_score: float, worker_cfg) -> float:
     """Normalize model raw score to unified anomaly scale [0,10]."""
     method = str(getattr(worker_cfg, "ML_ANOMALY_NORM_METHOD", "percentile") or "percentile").lower()
@@ -262,6 +269,7 @@ class BehavioralMLAnalyzer:
         """
         n = int(profile.get("n") or 0)
         if n < self._profile_min_events:
+            _ml_debug(f"[BaselineDrift] User profile warmup: n={n} < {self._profile_min_events}")
             return {"score": 0.0, "reasons": ["baseline_warmup"], "n": n}
 
         off_b = float(profile.get("ema_off_hours") or 0.0)
@@ -310,6 +318,13 @@ class BehavioralMLAnalyzer:
         elif is_off > 0 and is_ext > 0:
             score += 0.8
             reasons.append("sequence_offhours_external")
+
+        _ml_debug(
+            f"[BaselineDrift] n={n}, is_off={is_off:.0f}, is_ext={is_ext:.0f}, "
+            f"is_clip={is_clip:.0f}, is_risky={is_risky:.0f}, "
+            f"baseline_offs={off_b:.3f}, ext={ext_b:.3f}, clip={clip_b:.3f}, risky={risky_b:.3f}, "
+            f"score={score:.2f}, reasons={reasons}"
+        )
 
         return {"score": _clamp_0_10(score), "reasons": reasons, "n": n}
 
@@ -394,6 +409,15 @@ class BehavioralMLAnalyzer:
             deviation += 0.9
             reasons.append("transformation_signal")
 
+        # Debug logging
+        _ml_debug(
+            f"[ProfileDeviation] User={user}, is_off={is_off_hours:.0f}, "
+            f"off_ratio={off_hours_ratio:.3f}, clip_10m={clipboard_count}, "
+            f"ext_1h={ext_count_1h}, ext_base={ext_baseline:.3f}, "
+            f"small_clip_ext={small_clip_ext_1h}, signal={signal}, "
+            f"deviation={deviation:.2f}, reasons={reasons}"
+        )
+
         return {
             "score": _clamp_0_10(deviation),
             "reasons": reasons,
@@ -424,18 +448,34 @@ class BehavioralMLAnalyzer:
         value = min(6.0, value + incremental)  # Cap tại 6.0 để cho phép fragmented exfil tích lũy đủ để trigger alert (previous cap: 3.0)
 
         self._accumulator[user] = {"value": value, "ts": ts.timestamp()}
+        
+        _ml_debug(
+            f"[Accumulator] User={user}, elapsed_h={elapsed_h:.2f}, decay={decay:.3f}, "
+            f"old_value={float(state['value']):.3f}, incremental={incremental:.3f}, "
+            f"new_value={value:.3f}"
+        )
+        
         return value
 
     def predict(self, event: Dict[str, Any], event_history: Optional[list] = None) -> Dict[str, Any]:
         if self.model_path.exists() and not self.is_loaded:
             self.load_model()
         if not self.is_loaded or self.model is None:
+            _ml_debug("ML: Model not loaded, returning 0.0")
             return {"anomaly_score": 0.0, "is_anomaly": False, "features": None, "error": "Model not loaded"}
 
         try:
             history = event_history or []
+            user = self._extract_user(event)
+            ts = self._parse_ts(event)
+            event_type = str(event.get("type") or event.get("event_type") or "").lower()
+            
+            _ml_debug(f"[ML DEBUG] === New Event ===")
+            _ml_debug(f"[ML DEBUG] User: {user}, Type: {event_type}, Time: {ts}")
+
             if history:
                 self.feature_extractor.event_history = history
+                _ml_debug(f"[ML DEBUG] History size: {len(history)} events")
 
             raw_features = self.feature_extractor.extract(event)
             model_features = self._model_input_features(raw_features)
@@ -458,9 +498,9 @@ class BehavioralMLAnalyzer:
                 threshold = 7.0
                 boost_factor = 1.0
 
+            _ml_debug(f"[ML DEBUG] Raw score: {raw_score:.4f} -> Model score: {model_score:.2f}, Threshold: {threshold:.2f}")
+
             profile = self._profile_deviation(event, history)
-            user = self._extract_user(event)
-            ts = self._parse_ts(event)
             signal = self._event_signals(event)
             user_profile = self._update_user_profile(user, ts, signal)
             baseline = self._baseline_drift_score(ts, signal, user_profile)
@@ -473,6 +513,17 @@ class BehavioralMLAnalyzer:
                 + accum * max(0.0, min(1.0, boost_factor))
             )
             is_anomaly = anomaly_score >= threshold
+
+            # Detailed breakdown logging
+            _ml_debug(f"[ML DEBUG] Score Breakdown:")
+            _ml_debug(f"  - Model Score:     {model_score:.3f} x 0.65 = {model_score * 0.65:.3f}")
+            _ml_debug(f"  - Profile Score:  {profile['score']:.3f} x 0.25 = {float(profile['score']) * 0.25:.3f}")
+            _ml_debug(f"  - Baseline Score: {baseline['score']:.3f} x 0.10 = {float(baseline['score']) * 0.10:.3f}")
+            _ml_debug(f"  - Slow Burn:      {accum:.3f} x {boost_factor:.2f} = {accum * boost_factor:.3f}")
+            _ml_debug(f"  - TOTAL: {anomaly_score:.3f}, Is Anomaly: {is_anomaly}")
+            _ml_debug(f"[ML DEBUG] Profile reasons: {profile['reasons']}")
+            _ml_debug(f"[ML DEBUG] Baseline reasons: {baseline['reasons']}")
+            _ml_debug(f"[ML DEBUG] Signal flags: {signal}")
 
             return {
                 "anomaly_score": float(anomaly_score),
@@ -495,3 +546,177 @@ class BehavioralMLAnalyzer:
         if self.model_path.exists() and not self.is_loaded:
             self.load_model()
         return self.is_loaded and self.model is not None
+    
+    def analyze_combined_content(self, combined_text: str) -> Dict[str, Any]:
+        """
+        Phân tích combined content từ nhiều fragments.
+        
+        ĐÂY LÀ TÍNH NĂNG ML để cover case "attacker chia nhỏ dữ liệu để né YARA".
+        Khi các fragments được gom lại, ML sẽ phân tích:
+        1. Entity extraction (CCCD, phone, email, bank account...)
+        2. Semantic classification (contract, personal_info, financial...)
+        3. Sensitive content detection
+        
+        Args:
+            combined_text: Text đã gom từ nhiều fragments
+            
+        Returns:
+            Dict chứa:
+            - entities: Dict[str, int] - count của mỗi loại entity
+            - semantic_categories: Dict[str, float] - semantic scores
+            - is_sensitive: bool - True nếu phát hiện sensitive content
+            - risk_level: str - 'low', 'medium', 'high', 'critical'
+        """
+        try:
+            # 1. Entity extraction sử dụng MLContentAnalyzer
+            entities = {}
+            try:
+                from .content_fingerprint import MLContentAnalyzer
+                ml_analyzer = MLContentAnalyzer()
+                analysis = ml_analyzer.analyze_content(combined_text)
+                
+                if analysis:
+                    # Trích xuất entities từ ML analysis
+                    for entity_type, count in analysis.items():
+                        if isinstance(entity_type, str) and entity_type.startswith('_'):
+                            continue
+                        if isinstance(count, (int, float)) and count > 0:
+                            entities[entity_type] = int(count)
+            except Exception as e:
+                logger.debug(f"[MLAnalyzer] Entity extraction failed: {e}")
+            
+            # 2. Regex-based entity extraction cho structured data
+            # CCCD/CMND (9 hoặc 12 số)
+            import re
+            cccd_pattern = r'\b\d{9}\b|\b\d{12}\b'
+            cccd_matches = re.findall(cccd_pattern, combined_text)
+            if cccd_matches:
+                entities['cccd'] = max(entities.get('cccd', 0), len(cccd_matches))
+            
+            # Phone numbers (10-11 số, bắt đầu bằng 0)
+            phone_pattern = r'\b0\d{9,10}\b'
+            phone_matches = re.findall(phone_pattern, combined_text)
+            if phone_matches:
+                entities['phone'] = max(entities.get('phone', 0), len(set(phone_matches)))
+            
+            # Email
+            email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+            email_matches = re.findall(email_pattern, combined_text, re.IGNORECASE)
+            if email_matches:
+                entities['email'] = max(entities.get('email', 0), len(set(email_matches)))
+            
+            # Bank account (số có 10-14 chữ số)
+            bank_pattern = r'\b\d{10,14}\b'
+            bank_matches = re.findall(bank_pattern, combined_text)
+            if bank_matches:
+                entities['bank_account'] = max(entities.get('bank_account', 0), len(bank_matches))
+            
+            # 3. Semantic classification
+            semantic_categories = {}
+            text_lower = combined_text.lower()
+            
+            # Contract/legal keywords
+            contract_keywords = ['hợp đồng', 'hđtt', 'bên a', 'bên b', 'điều khoản', 
+                               'thỏa thuận', 'cam kết', 'quyền và nghĩa vụ']
+            contract_score = sum(1 for kw in contract_keywords if kw in text_lower) / len(contract_keywords)
+            if contract_score > 0:
+                semantic_categories['contract'] = contract_score
+            
+            # Personal info keywords
+            personal_keywords = ['họ tên', 'ngày sinh', 'nơi sinh', 'địa chỉ', 'cmnd', 'cccd',
+                               'passport', 'sinh viên', 'nhân viên']
+            personal_score = sum(1 for kw in personal_keywords if kw in text_lower) / len(personal_keywords)
+            if personal_score > 0:
+                semantic_categories['personal_info'] = personal_score
+            
+            # Financial keywords
+            financial_keywords = ['tiền', 'vnd', 'đồng', 'thanh toán', 'chuyển khoản', 
+                                'tài khoản', 'lương', 'thu nhập']
+            financial_score = sum(1 for kw in financial_keywords if kw in text_lower) / len(financial_keywords)
+            if financial_score > 0:
+                semantic_categories['financial'] = financial_score
+            
+            # 4. Sensitive content detection
+            sensitive_keywords = {
+                'critical': ['mật khẩu', 'password', 'secret', 'key', 'api_key', 'token'],
+                'high': ['cccd', 'cmnd', 'số chứng minh', 'credit card', 'bank account'],
+                'medium': ['email', 'phone', 'sđt', 'điện thoại']
+            }
+            
+            is_sensitive = False
+            sensitivity_level = 'none'
+            
+            for level in ['critical', 'high', 'medium']:
+                if any(kw in text_lower for kw in sensitive_keywords[level]):
+                    is_sensitive = True
+                    sensitivity_level = level
+                    break
+            
+            # 5. Risk assessment
+            entity_count = sum(entities.values())
+            risk_score = 0.0
+            
+            # Risk từ entities
+            if entities.get('cccd', 0) > 0 or entities.get('cmnd', 0) > 0:
+                risk_score += 3.0
+            if entities.get('bank_account', 0) > 0:
+                risk_score += 2.0
+            if entities.get('phone', 0) > 2:
+                risk_score += 1.5
+            if entities.get('email', 0) > 3:
+                risk_score += 1.0
+            
+            # Risk từ semantic categories
+            risk_score += semantic_categories.get('contract', 0) * 2.0
+            risk_score += semantic_categories.get('personal_info', 0) * 2.0
+            risk_score += semantic_categories.get('financial', 0) * 1.5
+            
+            # Risk từ sensitive content
+            if sensitivity_level == 'critical':
+                risk_score += 3.0
+            elif sensitivity_level == 'high':
+                risk_score += 2.0
+            elif sensitivity_level == 'medium':
+                risk_score += 1.0
+            
+            # Determine risk level
+            risk_level = 'low'
+            if risk_score >= 8.0:
+                risk_level = 'critical'
+            elif risk_score >= 5.0:
+                risk_level = 'high'
+            elif risk_score >= 3.0:
+                risk_level = 'medium'
+            
+            result = {
+                'entities': entities,
+                'entity_count': entity_count,
+                'semantic_categories': semantic_categories,
+                'is_sensitive': is_sensitive,
+                'sensitivity_level': sensitivity_level,
+                'risk_score': min(10.0, risk_score),
+                'risk_level': risk_level,
+                'content_length': len(combined_text),
+                'fragment_combined': True
+            }
+            
+            logger.debug(
+                f"[MLAnalyzer] Combined content analysis: "
+                f"entities={entities}, risk_level={risk_level}"
+            )
+            
+            return result
+            
+        except Exception as e:
+            logger.error(f"[MLAnalyzer] Error analyzing combined content: {e}")
+            return {
+                'entities': {},
+                'entity_count': 0,
+                'semantic_categories': {},
+                'is_sensitive': False,
+                'sensitivity_level': 'none',
+                'risk_score': 0.0,
+                'risk_level': 'low',
+                'content_length': 0,
+                'error': str(e)
+            }
